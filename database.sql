@@ -98,6 +98,8 @@ CREATE TABLE IF NOT EXISTS services (
   image_url VARCHAR(500) NULL,
   display_order INT NOT NULL DEFAULT 0,
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  notes TEXT NULL,
+  good_to_know TEXT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   INDEX idx_services_category (category_id),

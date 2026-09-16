@@ -50,6 +50,16 @@ const migrations = [
     "display_order",
     "ALTER TABLE services ADD COLUMN display_order INT NOT NULL DEFAULT 0",
   ],
+  [
+    "services",
+    "notes",
+    "ALTER TABLE services ADD COLUMN notes TEXT NULL",
+  ],
+  [
+    "services",
+    "good_to_know",
+    "ALTER TABLE services ADD COLUMN good_to_know TEXT NULL",
+  ],
 ];
 
 export async function migrate() {

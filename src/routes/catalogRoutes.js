@@ -1,25 +1,26 @@
 // ==================================================
-// Catalog routes — export/import of the salon catalog (JWT-protected)
+// Catalog routes — reference-format Excel export/import (JWT-protected)
 // ==================================================
 import { Router } from "express";
 import multer from "multer";
 import {
-  exportCatalogJson,
-  importCatalogFile,
+  exportCatalogExcel,
+  importCatalogExcel,
 } from "../controllers/catalogController.js";
 import { authMiddleware } from "../middleware/authMiddleware.js";
 
 const router = Router();
 
-// Legacy .json file uploads, capped at 10 MB. (The Admin Excel import flow
-// sends parsed JSON instead — multer simply passes that request through.)
+// .xlsx uploads only, capped at 10 MB.
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 },
   fileFilter(req, file, callback) {
+    const name = file.originalname?.toLowerCase() ?? "";
     if (
-      file.mimetype === "application/json" ||
-      file.originalname?.toLowerCase().endsWith(".json")
+      name.endsWith(".xlsx") ||
+      file.mimetype ===
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     ) {
       return callback(null, true);
     }
@@ -27,10 +28,10 @@ const upload = multer({
   },
 });
 
-// The whole module is admin-only — exports contain the full catalog.
+// The whole module is admin-only — the export contains the full catalogue.
 router.use(authMiddleware);
 
-router.get("/export", exportCatalogJson);
-router.post("/import", upload.single("file"), importCatalogFile);
+router.get("/export", exportCatalogExcel);
+router.post("/import", upload.single("file"), importCatalogExcel);
 
 export default router;
