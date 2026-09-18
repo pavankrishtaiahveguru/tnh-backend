@@ -127,6 +127,15 @@ CREATE INDEX IF NOT EXISTS idx_services_category ON services(category_id);
 CREATE INDEX IF NOT EXISTS idx_services_sub_category ON services(sub_category_id);
 CREATE INDEX IF NOT EXISTS idx_services_audience ON services(audience);
 CREATE INDEX IF NOT EXISTS idx_services_active ON services(is_active);
+-- Covers the public Services page's default ordering (display_order, name)
+-- so Postgres can satisfy ORDER BY + LIMIT from the index instead of a sort.
+CREATE INDEX IF NOT EXISTS idx_services_display_order_name
+  ON services(display_order, name);
+-- Trailing-index coverage for branch filtering via service_branches
+-- (branch_id index exists; this adds the reverse direction used by EXISTS
+-- lookups per service when the planner prefers service_id leading).
+CREATE INDEX IF NOT EXISTS idx_service_branches_service_branch
+  ON service_branches(service_id, branch_id);
 
 DROP TRIGGER IF EXISTS trg_services_updated_at ON services;
 CREATE TRIGGER trg_services_updated_at BEFORE UPDATE ON services

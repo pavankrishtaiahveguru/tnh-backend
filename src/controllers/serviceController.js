@@ -3,6 +3,7 @@
 // ==================================================
 import {
   findServices,
+  findServicesPage,
   findServiceById,
   findServiceBySlug,
   createService,
@@ -16,6 +17,23 @@ import {
   findSubCategoriesByCategoryId,
 } from "../models/Category.js";
 import { findBranches } from "../models/Branch.js";
+import { runWithQueryContext } from "../config/database.js";
+import { logApiTiming } from "../utils/perfLog.js";
+
+// Pagination defaults (Phase 5) — sensible maximum so no client can request
+// thousands of rows at once.
+const DEFAULT_LIMIT = 24;
+const MAX_LIMIT = 50;
+
+// Whitelist of sort keys the frontend may pass (Phase 8). Anything else falls
+// back to the default catalog order inside the model layer.
+const ALLOWED_SORTS = new Set([
+  "menu",
+  "nameAsc",
+  "nameDesc",
+  "priceAsc",
+  "priceDesc",
+]);
 
 // Wraps controller bodies so unexpected errors never leak SQL or stack traces.
 async function handle(res, fn) {
@@ -31,20 +49,75 @@ async function handle(res, fn) {
 }
 
 export async function getServices(req, res) {
+  const startedAt = performance.now();
   return handle(res, async () => {
-    const { search, category, subCategory, branch, audience, status } =
-      req.query;
-
-    const services = await findServices({
+    const {
       search,
+      category,
+      subCategory,
+      branch,
+      audience,
+      status,
+      page,
+      limit,
+      sort,
+      priceMin,
+      priceMax,
+    } = req.query;
+
+    // New paginated path (page/limit/sort/price params present) — used by the
+    // public Services page. The legacy shape (no page param) keeps returning
+    // the full filtered list, so existing consumers are unaffected.
+    const usePagination = page !== undefined || limit !== undefined;
+
+    const filters = {
+      search: search?.trim() || undefined,
       categorySlug: category,
+      // Accepted as slug OR display name (public page chips use names; admin
+      // callers use slugs) — the model matches either.
       subCategorySlug: subCategory,
+      subCategoryName: subCategory,
       branchSlug: branch,
       audience,
       status,
-    });
+      sort: ALLOWED_SORTS.has(sort) ? sort : undefined,
+      priceMin: priceMin != null && priceMin !== "" && Number.isFinite(Number(priceMin))
+        ? Number(priceMin)
+        : undefined,
+      priceMax: priceMax != null && priceMax !== "" && Number.isFinite(Number(priceMax))
+        ? Number(priceMax)
+        : undefined,
+      limit: limit != null && limit !== "" ? Number(limit) : DEFAULT_LIMIT,
+      maxLimit: MAX_LIMIT,
+      page: page != null && page !== "" ? Number(page) : 1,
+      includeFacets: usePagination,
+    };
 
-    return res.status(200).json({ success: true, data: { services } });
+    const { result, stats } = await runWithQueryContext(() =>
+      usePagination ? findServicesPage(filters) : findServices(filters),
+    );
+
+    const services = Array.isArray(result) ? result : result.services;
+    const pagination = Array.isArray(result) ? undefined : result.pagination;
+    const subCategories =
+      Array.isArray(result) || !usePagination ? undefined : result.subCategories;
+
+    logApiTiming(
+      "Services API",
+      {
+        startedAt,
+        method: req.method,
+        url: req.originalUrl,
+        rowCount: services.length,
+      },
+      stats,
+    );
+
+    return res.status(200).json(
+      pagination
+        ? { success: true, data: { services }, subCategories, pagination }
+        : { success: true, data: { services } },
+    );
   });
 }
 

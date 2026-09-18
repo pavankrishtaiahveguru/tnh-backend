@@ -1,7 +1,40 @@
 import pg from "pg";
 import dotenv from "dotenv";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 dotenv.config();
+
+// ---- Per-request query instrumentation (development observability) ----
+// Lets controllers wrap a request body in runWithQueryContext() and read back
+// how many SQL queries ran and how much DB time they took — without threading
+// a stats object through every model call. No-op outside that wrapper.
+const queryContext = new AsyncLocalStorage();
+
+export function runWithQueryContext(fn) {
+  return queryContext.run({ count: 0, timeMs: 0 }, async () => {
+    const result = await fn();
+    // Snapshot the stats INSIDE the context — the store is unreadable after
+    // run() exits, so callers get { result, stats } back.
+    const store = queryContext.getStore();
+    return { result, stats: { count: store.count, timeMs: store.timeMs } };
+  });
+}
+
+export function getQueryStats() {
+  return queryContext.getStore() ?? null;
+}
+
+async function withQueryTiming(run) {
+  const stats = queryContext.getStore();
+  if (!stats) return run();
+  const startedAt = performance.now();
+  try {
+    return await run();
+  } finally {
+    stats.count += 1;
+    stats.timeMs += performance.now() - startedAt;
+  }
+}
 
 const { Pool, types } = pg;
 
@@ -54,9 +87,11 @@ function adapt(pgResult) {
 // matching how every other query in this codebase is written.
 async function query(sql, params) {
   const text = toPgQuery(sql);
-  const result =
-    params === undefined ? await pool.query(text) : await pool.query(text, params);
-  return adapt(result);
+  return withQueryTiming(() =>
+    params === undefined
+      ? pool.query(text).then(adapt)
+      : pool.query(text, params).then(adapt),
+  );
 }
 
 async function getConnection() {
@@ -64,11 +99,11 @@ async function getConnection() {
   return {
     query: async (sql, params) => {
       const text = toPgQuery(sql);
-      const result =
+      return withQueryTiming(() =>
         params === undefined
-          ? await client.query(text)
-          : await client.query(text, params);
-      return adapt(result);
+          ? client.query(text).then(adapt)
+          : client.query(text, params).then(adapt),
+      );
     },
     beginTransaction: () => client.query("BEGIN"),
     commit: () => client.query("COMMIT"),
