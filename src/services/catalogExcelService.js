@@ -673,14 +673,19 @@ export async function applyServicesImport(parsedRows) {
   try {
     await connection.beginTransaction();
 
+    // Built in JS (via the same `serviceKey` used for import-row matching)
+    // rather than as MySQL-specific REGEXP_REPLACE SQL, so both sides of the
+    // match always agree on normalization.
     const [existingRows] = await connection.query(
-      `SELECT s.id,
-              CONCAT(LOWER(c.name), '::', LOWER(TRIM(REGEXP_REPLACE(s.name, '\\\\s+', ' '))), '::', LOWER(TRIM(s.audience))) AS match_key
+      `SELECT s.id, s.name, s.audience, c.name AS category_name
        FROM services s
        INNER JOIN categories c ON c.id = s.category_id`,
     );
     const existingByKey = new Map(
-      existingRows.map((s) => [s.match_key, Number(s.id)]),
+      existingRows.map((s) => [
+        serviceKey(s.category_name, s.name, s.audience),
+        Number(s.id),
+      ]),
     );
 
     for (const row of parsedRows) {
@@ -702,7 +707,7 @@ export async function applyServicesImport(parsedRows) {
             row.priceRange,
             row.duration,
             row.description,
-            row.isActive ? 1 : 0,
+            Boolean(row.isActive),
             row.notes,
             row.goodToKnow,
             existingId,
@@ -730,7 +735,7 @@ export async function applyServicesImport(parsedRows) {
           `INSERT INTO services
              (slug, category_id, sub_category_id, name, audience, pricing_type,
               price, price_range, duration, description, is_active, notes, good_to_know)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
           [
             slug,
             row.categoryId,
@@ -742,7 +747,7 @@ export async function applyServicesImport(parsedRows) {
             row.priceRange,
             row.duration,
             row.description,
-            row.isActive ? 1 : 0,
+            Boolean(row.isActive),
             row.notes,
             row.goodToKnow,
           ],
@@ -771,8 +776,9 @@ export async function applyServicesImport(parsedRows) {
       for (const branchSlug of row.branchSlugs) {
         // eslint-disable-next-line no-await-in-loop
         await connection.query(
-          `INSERT IGNORE INTO service_branches (service_id, branch_id)
-           SELECT ?, id FROM branches WHERE slug = ?`,
+          `INSERT INTO service_branches (service_id, branch_id)
+           SELECT ?, id FROM branches WHERE slug = ?
+           ON CONFLICT DO NOTHING`,
           [serviceId, branchSlug],
         );
       }

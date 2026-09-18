@@ -26,7 +26,7 @@ export async function findAdminById(id) {
 // Creates a new admin row. Expects an already-hashed password.
 export async function createAdmin({ name, email, passwordHash, role = "admin" }) {
   const [result] = await pool.query(
-    "INSERT INTO admins (name, email, password_hash, role, is_active) VALUES (?, ?, ?, ?, ?)",
+    "INSERT INTO admins (name, email, password_hash, role, is_active) VALUES (?, ?, ?, ?, ?) RETURNING id",
     [name, email, passwordHash, role, true]
   );
   return result.insertId;

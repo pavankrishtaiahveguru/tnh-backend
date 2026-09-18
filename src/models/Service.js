@@ -89,7 +89,9 @@ export async function findServices(filters = {}) {
   const values = [];
 
   if (filters.search) {
-    conditions.push(`(s.name LIKE ? OR c.name LIKE ? OR sc.name LIKE ?)`);
+    // ILIKE keeps the pre-migration (MySQL) case-insensitive search behavior;
+    // plain LIKE is case-sensitive in PostgreSQL.
+    conditions.push(`(s.name ILIKE ? OR c.name ILIKE ? OR sc.name ILIKE ?)`);
     const term = `%${filters.search}%`;
     values.push(term, term, term);
   }
@@ -112,15 +114,15 @@ export async function findServices(filters = {}) {
   }
   if (filters.branchSlug) {
     if (filters.branchSlug === "both") {
+      // "Both branches" is a filter meaning "available at either branch" —
+      // not a branch record. EXISTS keeps the result duplicate-free even
+      // when a service is linked to both branches.
       conditions.push(
-        `NOT EXISTS (
-           SELECT 1 FROM service_branches sb_ex
-           WHERE sb_ex.service_id = s.id
-             AND sb_ex.branch_id NOT IN (SELECT id FROM branches WHERE slug IN ('indiranagar', 'sarjapur-road'))
-         ) AND (
-           SELECT COUNT(*) FROM service_branches sb_cnt
-           WHERE sb_cnt.service_id = s.id
-         ) = 2`,
+        `EXISTS (
+           SELECT 1 FROM service_branches sb
+           INNER JOIN branches b ON b.id = sb.branch_id
+           WHERE sb.service_id = s.id AND b.slug IN ('indiranagar', 'sarjapur-road')
+         )`,
       );
     } else {
       conditions.push(
@@ -182,7 +184,7 @@ export async function createService(data) {
     const [result] = await connection.query(
       `INSERT INTO services
         (slug, category_id, sub_category_id, name, audience, description, pricing_type, price, price_range, duration, image, image_url, is_active)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
       [
         data.slug,
         data.category_id,
@@ -196,7 +198,7 @@ export async function createService(data) {
         data.duration ?? null,
         data.image ?? null,
         data.image_url ?? null,
-        data.is_active ? 1 : 0,
+        Boolean(data.is_active),
       ],
     );
 
@@ -268,7 +270,7 @@ export async function updateService(id, data) {
     }
     if (data.is_active !== undefined) {
       fields.push("is_active = ?");
-      values.push(data.is_active ? 1 : 0);
+      values.push(Boolean(data.is_active));
     }
 
     if (fields.length > 0) {
@@ -310,7 +312,7 @@ export async function deleteService(id) {
 
 export async function updateServiceStatus(id, isActive) {
   await pool.query(`UPDATE services SET is_active = ? WHERE id = ?`, [
-    isActive ? 1 : 0,
+    Boolean(isActive),
     id,
   ]);
 }
@@ -339,7 +341,7 @@ async function writeBranches(connection, serviceId, branchIds) {
   const list = Array.isArray(branchIds) ? branchIds : [];
   for (const branchId of list) {
     await connection.query(
-      `INSERT IGNORE INTO service_branches (service_id, branch_id) VALUES (?, ?)`,
+      `INSERT INTO service_branches (service_id, branch_id) VALUES (?, ?) ON CONFLICT DO NOTHING`,
       [serviceId, branchId],
     );
   }

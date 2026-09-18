@@ -1,6 +1,6 @@
 // ==================================================
 // Catalog seeder — imports the existing TNH frontend catalog and populates
-// MySQL (branches, categories, sub_categories, services + variants +
+// PostgreSQL (branches, categories, sub_categories, services + variants +
 // service_branches).
 // Run with: npm run seed:catalog
 // Idempotent: matches on slug, updates names/prices, skips existing rows.
@@ -50,17 +50,17 @@ async function upsertBranches(branches) {
       `INSERT INTO branches
         (slug, name, phone, email, address, map_url, map_embed_url, title, subtitle, hours, about_title)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE
-        name = VALUES(name),
-        phone = VALUES(phone),
-        email = VALUES(email),
-        address = VALUES(address),
-        map_url = VALUES(map_url),
-        map_embed_url = VALUES(map_embed_url),
-        title = VALUES(title),
-        subtitle = VALUES(subtitle),
-        hours = VALUES(hours),
-        about_title = VALUES(about_title)`,
+       ON CONFLICT (slug) DO UPDATE SET
+        name = EXCLUDED.name,
+        phone = EXCLUDED.phone,
+        email = EXCLUDED.email,
+        address = EXCLUDED.address,
+        map_url = EXCLUDED.map_url,
+        map_embed_url = EXCLUDED.map_embed_url,
+        title = EXCLUDED.title,
+        subtitle = EXCLUDED.subtitle,
+        hours = EXCLUDED.hours,
+        about_title = EXCLUDED.about_title`,
       [
         slug,
         branch.name,
@@ -83,10 +83,11 @@ async function upsertCategory(category) {
   const [result] = await pool.query(
     `INSERT INTO categories (slug, name, description, icon)
      VALUES (?, ?, ?, ?)
-     ON DUPLICATE KEY UPDATE
-       name = VALUES(name),
-       description = VALUES(description),
-       icon = VALUES(icon)`,
+     ON CONFLICT (slug) DO UPDATE SET
+       name = EXCLUDED.name,
+       description = EXCLUDED.description,
+       icon = EXCLUDED.icon
+     RETURNING id`,
     [
       slug,
       category.name,
@@ -94,18 +95,13 @@ async function upsertCategory(category) {
       category.icon ?? "sparkles",
     ],
   );
-  if (result.insertId) return result.insertId;
-
-  const [rows] = await pool.query(`SELECT id FROM categories WHERE slug = ?`, [
-    slug,
-  ]);
-  return rows[0].id;
+  return result.insertId;
 }
 
 async function upsertSubCategory(categoryId, name, slug = slugify(name)) {
   await pool.query(
     `INSERT INTO sub_categories (category_id, slug, name) VALUES (?, ?, ?)
-     ON DUPLICATE KEY UPDATE name = VALUES(name)`,
+     ON CONFLICT (category_id, slug) DO UPDATE SET name = EXCLUDED.name`,
     [categoryId, slug, name],
   );
   const [rows] = await pool.query(
@@ -125,17 +121,18 @@ async function upsertService(service, ids, displayOrder) {
     `INSERT INTO services
       (slug, category_id, sub_category_id, name, audience, description, pricing_type, price, price_range, duration, image_url, display_order, is_active)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON DUPLICATE KEY UPDATE
-       name = VALUES(name),
-       audience = VALUES(audience),
-       description = VALUES(description),
-       pricing_type = VALUES(pricing_type),
-       price = VALUES(price),
-       price_range = VALUES(price_range),
-       duration = VALUES(duration),
-       image_url = VALUES(image_url),
-      display_order = VALUES(display_order),
-       is_active = VALUES(is_active)`,
+     ON CONFLICT (slug) DO UPDATE SET
+       name = EXCLUDED.name,
+       audience = EXCLUDED.audience,
+       description = EXCLUDED.description,
+       pricing_type = EXCLUDED.pricing_type,
+       price = EXCLUDED.price,
+       price_range = EXCLUDED.price_range,
+       duration = EXCLUDED.duration,
+       image_url = EXCLUDED.image_url,
+       display_order = EXCLUDED.display_order,
+       is_active = EXCLUDED.is_active
+     RETURNING id`,
     [
       slug,
       ids.categoryId,
@@ -149,17 +146,11 @@ async function upsertService(service, ids, displayOrder) {
       service.duration ?? null,
       service.image ?? null,
       displayOrder,
-      isActive ? 1 : 0,
+      Boolean(isActive),
     ],
   );
 
-  let serviceId = result.insertId;
-  if (!serviceId) {
-    const [rows] = await pool.query(`SELECT id FROM services WHERE slug = ?`, [
-      slug,
-    ]);
-    serviceId = rows[0].id;
-  }
+  const serviceId = result.insertId;
 
   // Variants — replace on every run (small dataset, keeps labels/prices fresh).
   await pool.query(`DELETE FROM service_variants WHERE service_id = ?`, [
@@ -186,8 +177,9 @@ async function upsertService(service, ids, displayOrder) {
   ]);
   for (const branchSlug of branchIds) {
     await pool.query(
-      `INSERT IGNORE INTO service_branches (service_id, branch_id)
-       SELECT ?, id FROM branches WHERE slug = ?`,
+      `INSERT INTO service_branches (service_id, branch_id)
+       SELECT ?, id FROM branches WHERE slug = ?
+       ON CONFLICT DO NOTHING`,
       [serviceId, branchSlug],
     );
   }
@@ -218,7 +210,7 @@ async function seed() {
   if (existingAdmins.length === 0) {
     const passwordHash = await bcrypt.hash(ADMIN_PASSWORD, SALT_ROUNDS);
     await pool.query(
-      `INSERT INTO admins (name, email, password_hash, role, is_active) VALUES (?, ?, ?, 'admin', 1)`,
+      `INSERT INTO admins (name, email, password_hash, role, is_active) VALUES (?, ?, ?, 'admin', true)`,
       [ADMIN_NAME, email, passwordHash],
     );
     console.log(`Admin created: ${email}`);

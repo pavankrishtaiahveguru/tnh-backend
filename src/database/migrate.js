@@ -1,79 +1,20 @@
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import { readFileSync } from "node:fs";
 import dotenv from "dotenv";
 import pool from "../config/database.js";
 
 dotenv.config();
 
-const migrations = [
-  [
-    "categories",
-    "display_order",
-    "ALTER TABLE categories ADD COLUMN display_order INT NOT NULL DEFAULT 0",
-  ],
-  [
-    "services",
-    "pricing_type_from",
-    "ALTER TABLE services MODIFY COLUMN pricing_type ENUM('fixed', 'size', 'variant', 'from') NOT NULL DEFAULT 'fixed'",
-  ],
-  [
-    "categories",
-    "image",
-    "ALTER TABLE categories ADD COLUMN image VARCHAR(500) NULL",
-  ],
-  [
-    "services",
-    "image",
-    "ALTER TABLE services ADD COLUMN image VARCHAR(500) NULL",
-  ],
-  [
-    "branches",
-    "map_embed_url",
-    "ALTER TABLE branches ADD COLUMN map_embed_url TEXT NULL",
-  ],
-  [
-    "branches",
-    "title",
-    "ALTER TABLE branches ADD COLUMN title VARCHAR(255) NULL",
-  ],
-  [
-    "branches",
-    "subtitle",
-    "ALTER TABLE branches ADD COLUMN subtitle VARCHAR(255) NULL",
-  ],
-  ["branches", "hours", "ALTER TABLE branches ADD COLUMN hours JSON NULL"],
-  [
-    "branches",
-    "about_title",
-    "ALTER TABLE branches ADD COLUMN about_title VARCHAR(255) NULL",
-  ],
-  [
-    "services",
-    "display_order",
-    "ALTER TABLE services ADD COLUMN display_order INT NOT NULL DEFAULT 0",
-  ],
-  [
-    "services",
-    "notes",
-    "ALTER TABLE services ADD COLUMN notes TEXT NULL",
-  ],
-  [
-    "services",
-    "good_to_know",
-    "ALTER TABLE services ADD COLUMN good_to_know TEXT NULL",
-  ],
-];
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const schemaPath = join(__dirname, "..", "..", "database.pg.sql");
 
+// Applies the full PostgreSQL schema (database.pg.sql). Every statement is
+// idempotent (CREATE TABLE/INDEX IF NOT EXISTS, CREATE OR REPLACE, DROP
+// TRIGGER IF EXISTS + CREATE TRIGGER), so this is safe to re-run.
 export async function migrate() {
-  for (const [table, column, statement] of migrations) {
-    try {
-      await pool.query(statement);
-      console.log(`Added ${table}.${column}`);
-    } catch (error) {
-      if (error.code !== "ER_DUP_FIELDNAME") throw error;
-    }
-  }
-  await pool.query(
-    "UPDATE categories SET display_order = id WHERE display_order = 0",
-  );
+  const schema = readFileSync(schemaPath, "utf8");
+  await pool.query(schema);
 }
 
 if (process.argv[1]?.endsWith("/migrate.js")) {

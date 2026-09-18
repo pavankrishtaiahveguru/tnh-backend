@@ -60,7 +60,7 @@ async function start() {
   try {
     await testConnection();
   } catch (error) {
-    console.error("Failed to connect to MySQL:", error.message);
+    console.error("Failed to connect to the database:", error.message);
     process.exit(1);
   }
 
@@ -69,8 +69,7 @@ async function start() {
     console.log("✓ TNH SALON BACKEND");
     console.log("========================================");
     console.log("");
-    console.log("✓ MySQL connection established");
-    console.log(`✓ Database: ${process.env.DB_NAME}`);
+    console.log("✓ PostgreSQL (Neon) connection established");
     console.log(`✓ Server running: http://localhost:${PORT}`);
     console.log("");
     console.log("========================================");

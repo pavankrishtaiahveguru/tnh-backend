@@ -58,7 +58,7 @@ export async function updateBranch(id, data) {
   }
   if (data.is_active !== undefined) {
     fields.push("is_active = ?");
-    values.push(data.is_active ? 1 : 0);
+    values.push(Boolean(data.is_active));
   }
 
   if (fields.length === 0) return findBranchById(id);

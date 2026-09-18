@@ -112,7 +112,7 @@ export async function createCategory(data) {
   );
   const [result] = await pool.query(
     `INSERT INTO categories (slug, name, description, icon, image, image_url, display_order, is_active)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
     [
       data.slug,
       data.name,
@@ -121,7 +121,7 @@ export async function createCategory(data) {
       data.image ?? null,
       data.image_url ?? null,
       nextOrder.next_order,
-      data.is_active ? 1 : 0,
+      Boolean(data.is_active),
     ],
   );
   return result.insertId;
@@ -186,7 +186,7 @@ export async function updateCategory(id, data) {
   }
   if (data.is_active !== undefined) {
     fields.push("is_active = ?");
-    values.push(data.is_active ? 1 : 0);
+    values.push(Boolean(data.is_active));
   }
 
   if (fields.length === 0) return;
