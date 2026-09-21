@@ -122,6 +122,7 @@ async function upsertService(service, ids, displayOrder) {
       (slug, category_id, sub_category_id, name, audience, description, pricing_type, price, price_range, duration, image_url, display_order, is_active)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT (slug) DO UPDATE SET
+       sub_category_id = EXCLUDED.sub_category_id,
        name = EXCLUDED.name,
        audience = EXCLUDED.audience,
        description = EXCLUDED.description,
