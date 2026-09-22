@@ -3,7 +3,7 @@
 // ==================================================
 // Talks to the Cheerio AI Agent API on behalf of the backend. The API key
 // never leaves this process — callers only ever see the parsed `data` object.
-const CHEERIO_REQUEST_TIMEOUT_MS = 15000;
+const CHEERIO_REQUEST_TIMEOUT_MS = 5000;
 
 export async function interactWithCheerio({ question, history, collectedData }) {
   const apiUrl = process.env.CHEERIO_AI_API_URL;
