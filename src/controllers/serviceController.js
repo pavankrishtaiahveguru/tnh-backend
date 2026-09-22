@@ -4,6 +4,7 @@
 import {
   findServices,
   findServicesPage,
+  countActiveServices,
   findServiceById,
   findServiceBySlug,
   createService,
@@ -118,6 +119,32 @@ export async function getServices(req, res) {
         ? { success: true, data: { services }, subCategories, pagination }
         : { success: true, data: { services } },
     );
+  });
+}
+
+// GET /api/services/count — unfiltered total of active services. Powers the
+// Services page hero stat, which must stay constant regardless of any
+// category/subcategory/branch/gender/search filters. Returns ONE integer —
+// no rows are fetched.
+export async function getServicesCount(req, res) {
+  const startedAt = performance.now();
+  return handle(res, async () => {
+    const { result: count, stats } = await runWithQueryContext(() =>
+      countActiveServices(),
+    );
+
+    logApiTiming(
+      "Services Count API",
+      {
+        startedAt,
+        method: req.method,
+        url: req.originalUrl,
+        rowCount: 1,
+      },
+      stats,
+    );
+
+    return res.status(200).json({ success: true, count });
   });
 }
 

@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
+    "seed": "node scripts/seedCatalog.mjs",
     "seed:admin": "node src/seed/adminSeeder.js",
     "seed:catalog": "node scripts/seedCatalog.mjs",
     "backfill:subcategories": "node scripts/backfillServiceSubCategories.mjs",

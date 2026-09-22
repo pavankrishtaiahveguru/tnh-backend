@@ -115,6 +115,32 @@ export async function findServices(filters = {}) {
   return hydrateServices(rows);
 }
 
+// Unfiltered COUNT(*) of active services — the catalog total shown by the
+// Services page hero, which must never change with category/subCategory/
+// branch/audience/search filters. "Active" uses the app's existing status
+// definition (status === "Active" → s.is_active = TRUE in
+// buildServiceConditions). One lightweight query, no rows returned.
+export async function countActiveServices() {
+  const [rows] = await pool.query(
+    `SELECT COUNT(*) AS count FROM services WHERE is_active = TRUE`,
+  );
+  return Number(rows[0]?.count ?? 0);
+}
+
+// Public gender filter: "Men"/"Women" also include Unisex services (a
+// Unisex service is bookable by either audience). Single source of truth so
+// this rule is applied once, everywhere audience filtering happens —
+// findServices, findServicesPage, and the sub-category facet-count query all
+// go through buildServiceConditions below.
+const AUDIENCE_FILTER_MAP = {
+  Men: ["Men", "Unisex"],
+  Women: ["Women", "Unisex"],
+};
+
+function resolveAudienceValues(audience) {
+  return AUDIENCE_FILTER_MAP[audience] ?? [audience];
+}
+
 // Shared WHERE builder for both paginated and non-paginated listing queries.
 // NOTE: price conditions reference effective_min_price, produced by the
 // LEFT JOIN LATERAL in queries that include it (findServicesPage). The plain
@@ -148,8 +174,11 @@ function buildServiceConditions(filters = {}) {
     }
   }
   if (filters.audience) {
-    conditions.push(`s.audience = ?`);
-    values.push(filters.audience);
+    const audienceValues = resolveAudienceValues(filters.audience);
+    conditions.push(
+      `s.audience IN (${audienceValues.map(() => "?").join(", ")})`,
+    );
+    values.push(...audienceValues);
   }
   if (filters.status === "Active") {
     conditions.push(`s.is_active = TRUE`);

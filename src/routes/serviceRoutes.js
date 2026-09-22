@@ -4,6 +4,7 @@
 import { Router } from "express";
 import {
   getServices,
+  getServicesCount,
   getService,
   createNewService,
   updateExistingService,
@@ -15,6 +16,8 @@ import { authMiddleware } from "../middleware/authMiddleware.js";
 const router = Router();
 
 router.get("/", getServices);
+// Declared before /:id so "count" is not captured as an id param.
+router.get("/count", getServicesCount);
 router.get("/:id", getService);
 
 router.use(authMiddleware);

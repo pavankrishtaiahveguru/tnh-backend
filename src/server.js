@@ -11,6 +11,7 @@ import categoryRoutes from "./routes/categoryRoutes.js";
 import branchRoutes from "./routes/branchRoutes.js";
 import uploadRoutes from "./routes/uploadRoutes.js";
 import catalogRoutes from "./routes/catalogRoutes.js";
+import aiAgentRoutes from "./routes/aiAgentRoutes.js";
 
 dotenv.config();
 
@@ -41,6 +42,7 @@ app.use("/api/categories", categoryRoutes);
 app.use("/api/branches", branchRoutes);
 app.use("/api/upload", uploadRoutes);
 app.use("/api/catalog", catalogRoutes);
+app.use("/api/ai-agent", aiAgentRoutes);
 
 // ---- 404 handler ----
 app.use((req, res) => {
