@@ -9,6 +9,7 @@
     "start": "node src/server.js",
     "seed": "node scripts/seedCatalog.mjs",
     "seed:admin": "node src/seed/adminSeeder.js",
+    "admin:sync-credentials": "node scripts/updateAdminCredentials.mjs",
     "seed:catalog": "node scripts/seedCatalog.mjs",
     "backfill:subcategories": "node scripts/backfillServiceSubCategories.mjs",
     "db:migrate": "node src/database/migrate.js",
