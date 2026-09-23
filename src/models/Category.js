@@ -20,10 +20,10 @@ export async function findCategories() {
   if (categories.length === 0) return [];
 
   const [subCategories] = await pool.query(
-    `SELECT sc.id, sc.category_id, sc.slug, sc.name,
+    `SELECT sc.id, sc.category_id, sc.slug, sc.name, sc.display_order,
             (SELECT COUNT(*) FROM services s WHERE s.sub_category_id = sc.id) AS service_count
      FROM sub_categories sc
-     ORDER BY sc.name`,
+     ORDER BY sc.category_id, sc.display_order ASC, sc.id ASC`,
   );
 
   const subsByCategory = new Map();
@@ -35,6 +35,7 @@ export async function findCategories() {
       id: sub.id,
       slug: sub.slug,
       name: sub.name,
+      display_order: Number(sub.display_order),
       service_count: Number(sub.service_count),
     });
   }
@@ -66,11 +67,11 @@ export async function findCategoryById(id) {
   if (!category) return null;
 
   const [subCategories] = await pool.query(
-    `SELECT id, slug, name,
+    `SELECT id, slug, name, display_order,
             (SELECT COUNT(*) FROM services s WHERE s.sub_category_id = sc.id) AS service_count
      FROM sub_categories sc
      WHERE sc.category_id = ?
-     ORDER BY sc.name`,
+     ORDER BY sc.display_order ASC, sc.id ASC`,
     [id],
   );
 
@@ -80,6 +81,7 @@ export async function findCategoryById(id) {
       id: sub.id,
       slug: sub.slug,
       name: sub.name,
+      display_order: Number(sub.display_order),
       service_count: Number(sub.service_count),
     })),
     service_count: Number(category.service_count),
@@ -286,6 +288,16 @@ export async function replaceSubCategories(categoryId, entries) {
       existing.map((sub) => [sub.name.toLowerCase(), sub]),
     );
 
+    // Newly inserted sub-categories are appended after the current end of
+    // this category's order — never left at the display_order default of 0,
+    // which would otherwise jump a brand-new sub-category to the front of an
+    // already-ordered list.
+    const [[orderRow]] = await connection.query(
+      `SELECT COALESCE(MAX(display_order), -1) AS max_order FROM sub_categories WHERE category_id = ?`,
+      [categoryId],
+    );
+    let nextOrder = Number(orderRow.max_order) + 1;
+
     let inserted = 0;
     let renamed = 0;
     let removed = 0;
@@ -330,9 +342,10 @@ export async function replaceSubCategories(categoryId, entries) {
         const collision = new Set([...claimedSlugs, ...bySlug.keys()]).has(base);
         const slug = collision ? `${base}-${slugify(String(entry.id ?? "")).slice(0, 40) || Date.now().toString(36)}` : base;
         await connection.query(
-          `INSERT INTO sub_categories (category_id, slug, name) VALUES (?, ?, ?)`,
-          [categoryId, slug, name],
+          `INSERT INTO sub_categories (category_id, slug, name, display_order) VALUES (?, ?, ?, ?)`,
+          [categoryId, slug, name, nextOrder],
         );
+        nextOrder += 1;
         claimedSlugs.add(slug);
         inserted += 1;
       }
@@ -366,6 +379,27 @@ export async function replaceSubCategories(categoryId, entries) {
       removed += 1;
     }
 
+    // A deletion can leave a gap in display_order (e.g. 0, 2, 3 after
+    // removing what was at 1). Gaps don't break ORDER BY correctness, but
+    // dense values keep the column easy to reason about and match what a
+    // fresh reorder would produce — so close the gap here rather than
+    // leaving it until the next manual reorder.
+    if (removed > 0) {
+      const [remaining] = await connection.query(
+        `SELECT id, display_order FROM sub_categories
+         WHERE category_id = ? ORDER BY display_order ASC, id ASC`,
+        [categoryId],
+      );
+      for (let position = 0; position < remaining.length; position += 1) {
+        const row = remaining[position];
+        if (Number(row.display_order) === position) continue;
+        await connection.query(
+          `UPDATE sub_categories SET display_order = ? WHERE id = ?`,
+          [position, row.id],
+        );
+      }
+    }
+
     await connection.commit();
     return { inserted, renamed, removed };
   } catch (error) {
@@ -378,8 +412,99 @@ export async function replaceSubCategories(categoryId, entries) {
 
 export async function findSubCategoriesByCategoryId(categoryId) {
   const [rows] = await pool.query(
-    `SELECT id, slug, name FROM sub_categories WHERE category_id = ? ORDER BY name`,
+    `SELECT id, slug, name, display_order FROM sub_categories
+     WHERE category_id = ? ORDER BY display_order ASC, id ASC`,
     [categoryId],
   );
   return rows;
+}
+
+// Reorder every sub-category of ONE category in a single transaction.
+//
+// `items` must be a complete re-statement of this category's sub-category
+// ids (a bijection against what's already in the database) — never a
+// partial subset. That's what lets validation be a simple set-equality
+// check instead of guessing intent for ids the caller left out, and it
+// guarantees the column stays densely assigned (0..n-1) after every call.
+//
+// Guarantees (matches the admin categories reorder model above):
+//   - every id must belong to THIS category (no cross-category reorder)
+//   - no duplicate ids, no unknown ids, no missing ids
+//   - only display_order is written — id/slug/name/category_id and every
+//     service_id -> sub_category_id mapping are completely untouched
+//   - all-or-nothing: any validation failure rolls back with zero writes
+//
+// Returns { status, subcategories } where status is one of
+// "reordered" | "invalid-items" | "duplicate-ids" | "not-found" |
+// "set-mismatch" — the controller maps each to an honest 400/404 instead of
+// a false "order updated" success.
+export async function reorderSubCategories(categoryId, items) {
+  if (!Array.isArray(items) || items.length === 0) {
+    return { status: "invalid-items" };
+  }
+
+  const parsedItems = items.map((item) => ({
+    id: Number(item?.id),
+    displayOrder: Number(item?.displayOrder),
+  }));
+  const hasInvalidShape = parsedItems.some(
+    ({ id, displayOrder }) =>
+      !Number.isInteger(id) ||
+      id <= 0 ||
+      !Number.isInteger(displayOrder) ||
+      displayOrder < 0,
+  );
+  if (hasInvalidShape) {
+    return { status: "invalid-items" };
+  }
+
+  const submittedIds = parsedItems.map((item) => item.id);
+  if (new Set(submittedIds).size !== submittedIds.length) {
+    return { status: "duplicate-ids" };
+  }
+
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+
+    // Lock this category's sub-category rows for the duration of the
+    // reorder so a concurrent reorder/save can't interleave writes.
+    const [rows] = await connection.query(
+      `SELECT id FROM sub_categories WHERE category_id = ? FOR UPDATE`,
+      [categoryId],
+    );
+    if (rows.length === 0) {
+      await connection.rollback();
+      return { status: "not-found" };
+    }
+
+    const existingIds = rows.map((row) => Number(row.id));
+    const existingIdSet = new Set(existingIds);
+    const submittedIdSet = new Set(submittedIds);
+    const isExactMatch =
+      existingIds.length === submittedIds.length &&
+      existingIds.every((id) => submittedIdSet.has(id)) &&
+      submittedIds.every((id) => existingIdSet.has(id));
+    // Rejects both a foreign-category id slipping in AND a partial list
+    // that would leave some of this category's sub-categories un-ordered.
+    if (!isExactMatch) {
+      await connection.rollback();
+      return { status: "set-mismatch" };
+    }
+
+    for (const { id, displayOrder } of parsedItems) {
+      await connection.query(
+        `UPDATE sub_categories SET display_order = ? WHERE id = ? AND category_id = ?`,
+        [displayOrder, id, categoryId],
+      );
+    }
+
+    await connection.commit();
+    return { status: "reordered" };
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
 }

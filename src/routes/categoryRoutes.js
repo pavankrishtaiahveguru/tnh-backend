@@ -9,6 +9,7 @@ import {
   updateExistingCategory,
   removeCategory,
   reorderCategory,
+  reorderCategorySubCategories,
 } from "../controllers/categoryController.js";
 import { authMiddleware } from "../middleware/authMiddleware.js";
 
@@ -22,6 +23,7 @@ router.use(authMiddleware);
 router.post("/", createNewCategory);
 router.put("/:id", updateExistingCategory);
 router.patch("/:id/order", reorderCategory);
+router.put("/:categoryId/subcategories/reorder", reorderCategorySubCategories);
 router.delete("/:id", removeCategory);
 
 export default router;

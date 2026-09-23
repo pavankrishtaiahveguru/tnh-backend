@@ -86,12 +86,20 @@ CREATE TABLE IF NOT EXISTS sub_categories (
   category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE ON UPDATE CASCADE,
   slug VARCHAR(120) NOT NULL,
   name VARCHAR(150) NOT NULL,
+  display_order INTEGER NOT NULL DEFAULT 0,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT uq_subcategory_category_slug UNIQUE (category_id, slug)
 );
 
+-- Idempotent for pre-existing databases created before display_order existed.
+ALTER TABLE sub_categories ADD COLUMN IF NOT EXISTS display_order INTEGER NOT NULL DEFAULT 0;
+
 CREATE INDEX IF NOT EXISTS idx_sub_categories_category ON sub_categories(category_id);
+-- Covers admin/public sub-category listing order (per category, then dense
+-- rank, id as a deterministic tiebreaker for equal display_order values).
+CREATE INDEX IF NOT EXISTS idx_sub_categories_order
+  ON sub_categories(category_id, display_order, id);
 
 DROP TRIGGER IF EXISTS trg_sub_categories_updated_at ON sub_categories;
 CREATE TRIGGER trg_sub_categories_updated_at BEFORE UPDATE ON sub_categories

@@ -11,6 +11,7 @@ import {
   replaceSubCategories,
   normalizeCategorySlug,
   moveCategory,
+  reorderSubCategories,
 } from "../models/Category.js";
 
 async function handle(res, fn) {
@@ -215,6 +216,68 @@ export async function reorderCategory(req, res) {
       moved: true,
       rowsUpdated: move.rowsUpdated,
       data: { category: updated },
+    });
+  });
+}
+
+// PUT /api/categories/:categoryId/subcategories/reorder
+export async function reorderCategorySubCategories(req, res) {
+  return handle(res, async () => {
+    const { categoryId } = req.params;
+
+    const category = Number.isInteger(Number(categoryId))
+      ? await findCategoryById(Number(categoryId))
+      : await findBySlug(categoryId);
+    if (!category) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Category not found" });
+    }
+
+    const items = req.body?.items;
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "items must be a non-empty array of { id, displayOrder }",
+      });
+    }
+
+    const result = await reorderSubCategories(category.id, items);
+
+    if (result.status === "invalid-items") {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Each item needs a valid sub-category id and a non-negative displayOrder",
+      });
+    }
+    if (result.status === "duplicate-ids") {
+      return res.status(400).json({
+        success: false,
+        message: "items contains duplicate sub-category ids",
+      });
+    }
+    if (result.status === "not-found") {
+      return res.status(404).json({
+        success: false,
+        message: "This category has no sub-categories to reorder",
+      });
+    }
+    if (result.status === "set-mismatch") {
+      return res.status(400).json({
+        success: false,
+        message:
+          "items must include every sub-category currently in this category, and only sub-categories that belong to it",
+      });
+    }
+
+    // Fresh from the DB so the admin UI can trust the server's confirmed
+    // order rather than assuming its own optimistic update landed.
+    const updated = await findCategoryById(category.id);
+    return res.status(200).json({
+      success: true,
+      message: "Sub-category order updated",
+      data: { category: updated, subCategories: updated.subcategories },
     });
   });
 }
