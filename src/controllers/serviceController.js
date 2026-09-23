@@ -200,10 +200,18 @@ export async function createNewService(req, res) {
         .json({ success: false, message: "At least one branch is required" });
     }
 
-    const subCategoryId = await resolveSubCategoryId(
-      category.id,
-      body.subCategoryId ?? body.sub_category_id,
-    );
+    let subCategoryId;
+    try {
+      subCategoryId = await resolveSubCategoryId(
+        category.id,
+        body.subCategoryId ?? body.sub_category_id,
+      );
+    } catch (error) {
+      if (error?.code === "SUBCATEGORY_MISMATCH") {
+        return res.status(400).json({ success: false, message: error.message });
+      }
+      throw error;
+    }
 
     const slug = normalizeServiceSlug(body.name, body.audience);
     const existing = await findServiceBySlug(slug);
@@ -280,13 +288,22 @@ export async function updateExistingService(req, res) {
       }
     }
 
-    const sub_category_id =
+    let sub_category_id;
+    if (
       body.subCategoryId !== undefined || body.sub_category_id !== undefined
-        ? await resolveSubCategoryId(
-            categoryId ?? service.category_id,
-            body.subCategoryId ?? body.sub_category_id,
-          )
-        : undefined;
+    ) {
+      try {
+        sub_category_id = await resolveSubCategoryId(
+          categoryId ?? service.category_id,
+          body.subCategoryId ?? body.sub_category_id,
+        );
+      } catch (error) {
+        if (error?.code === "SUBCATEGORY_MISMATCH") {
+          return res.status(400).json({ success: false, message: error.message });
+        }
+        throw error;
+      }
+    }
 
     await updateService(service.id, {
       name: body.name !== undefined ? String(body.name).trim() : undefined,
@@ -404,18 +421,38 @@ async function resolveBranchIds(branchIds) {
 
 // Resolves a sub-category (id, slug, or name) within a category. Empty string
 // or null clears the sub-category.
+// Resolve an incoming sub-category reference (numeric id, slug, or name)
+// into a sub_categories.id that is GUARANTEED to belong to `categoryId`.
+//
+// HISTORICAL BUG (fixed): the numeric branch returned the raw value without
+// any parent-category check, so a stale/mismatched subCategoryId from the
+// frontend could silently map a service to a sub-category owned by a
+// DIFFERENT category (the schema's composite FKs do not enforce
+// sub_categories.category_id = services.category_id).
+// Returns:
+//   undefined → caller sent nothing (no change)
+//   null      → caller explicitly cleared it (null / "" / "none")
+//   number    → verified sub_categories.id owned by categoryId
+//   throws SUBCATEGORY_MISMATCH → value present but not in this category
 async function resolveSubCategoryId(categoryId, value) {
   if (value === undefined) return undefined;
   if (value === null || value === "" || value === "none") return null;
 
-  const asNumber = Number(value);
-  if (Number.isInteger(asNumber)) return asNumber;
-
   const subCategories = await findSubCategoriesByCategoryId(categoryId);
-  const match = subCategories.find(
-    (sub) =>
-      sub.slug === value ||
-      sub.name.toLowerCase() === String(value).toLowerCase(),
-  );
-  return match ? match.id : null;
+  const asNumber = Number(value);
+  const match = Number.isInteger(asNumber)
+    ? subCategories.find((sub) => Number(sub.id) === asNumber)
+    : subCategories.find(
+        (sub) =>
+          sub.slug === value ||
+          sub.name.toLowerCase() === String(value).toLowerCase(),
+      );
+  if (!match) {
+    const error = new Error(
+      `Sub-category "${value}" does not belong to the selected category`,
+    );
+    error.code = "SUBCATEGORY_MISMATCH";
+    throw error;
+  }
+  return match.id;
 }

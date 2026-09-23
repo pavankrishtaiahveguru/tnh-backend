@@ -213,9 +213,14 @@ async function upsertBranches(client, branches) {
 
 async function upsertCategory(client, category) {
   const slug = category.id ?? slugify(category.name);
+  // display_order: assigned ONLY on first insert (appends after the current
+  // max). Re-seeding must never overwrite admin-managed ordering, so the
+  // ON CONFLICT branch leaves it untouched. (Historically this insert omitted
+  // display_order entirely, so every seeded row got the schema default 0 —
+  // which made adjacent up/down swaps in moveCategory silent no-ops.)
   const [result] = await client.query(
-    `INSERT INTO categories (slug, name, description, icon)
-     VALUES (?, ?, ?, ?)
+    `INSERT INTO categories (slug, name, description, icon, display_order)
+     VALUES (?, ?, ?, ?, COALESCE((SELECT MAX(display_order) FROM categories), 0) + 1)
      ON CONFLICT (slug) DO UPDATE SET
        name = EXCLUDED.name,
        description = EXCLUDED.description,

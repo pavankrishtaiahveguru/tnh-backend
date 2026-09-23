@@ -119,7 +119,20 @@ export async function updateExistingCategory(req, res) {
     });
 
     if (Array.isArray(body.subCategories)) {
-      await replaceSubCategories(category.id, body.subCategories);
+      try {
+        await replaceSubCategories(category.id, body.subCategories);
+      } catch (error) {
+        // A sub-category still referenced by services cannot be removed —
+        // surface a real 409 instead of a generic 500.
+        if (String(error?.message ?? "").startsWith("SUBCATEGORY_IN_USE:")) {
+          const [, name, count] = String(error.message).split(":");
+          return res.status(409).json({
+            success: false,
+            message: `Cannot remove "${name}" — ${count} service${count === "1" ? "" : "s"} still belong${count === "1" ? "s" : ""} to it. Reassign those services first.`,
+          });
+        }
+        throw error;
+      }
     }
 
     const updated = await findCategoryById(category.id);
@@ -145,6 +158,18 @@ export async function removeCategory(req, res) {
         .json({ success: false, message: "Category not found" });
     }
 
+    // Guard: refuse to delete a category that still owns services or
+    // sub-categories with services. Deleting would otherwise cascade sub
+    // rows (ON DELETE CASCADE) and set every service's sub_category_id to
+    // NULL — destroying mapping data silently.
+    const serviceCount = Number(category.service_count ?? 0);
+    if (serviceCount > 0) {
+      return res.status(409).json({
+        success: false,
+        message: `Cannot delete "${category.name}" — ${serviceCount} service${serviceCount === 1 ? "" : "s"} still belong${serviceCount === 1 ? "s" : ""} to it. Move or delete those services first.`,
+      });
+    }
+
     await deleteCategory(category.id);
     return res.status(200).json({ success: true, message: "Category deleted" });
   });
@@ -164,8 +189,33 @@ export async function reorderCategory(req, res) {
         .status(400)
         .json({ success: false, message: "Invalid category direction" });
     }
-    const moved = await moveCategory(category.id, req.body.direction);
-    return res.status(200).json({ success: true, moved });
+    const move = await moveCategory(category.id, req.body.direction);
+    // Edge moves (already first/last) are validation failures, not silent
+    // successes — the database is untouched, so reporting "order updated"
+    // would be a false success and the admin UI would show an order that
+    // isn't real.
+    if (move.status === "top" || move.status === "bottom") {
+      const message =
+        move.status === "top"
+          ? "Category is already first — it cannot move up further"
+          : "Category is already last — it cannot move down further";
+      return res.status(400).json({ success: false, message });
+    }
+    if (move.status === "not-found") {
+      return res
+        .status(404)
+        .json({ success: false, message: "Category not found" });
+    }
+    // Return the full updated category (fresh from the DB) so the admin UI
+    // can refresh state from the authoritative server response.
+    const updated = await findCategoryById(category.id);
+    return res.status(200).json({
+      success: true,
+      message: "Category order updated",
+      moved: true,
+      rowsUpdated: move.rowsUpdated,
+      data: { category: updated },
+    });
   });
 }
 
