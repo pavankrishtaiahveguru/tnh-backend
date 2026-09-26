@@ -10,6 +10,8 @@ import {
   updateExistingService,
   updateExistingServiceStatus,
   removeService,
+  reorderServicesInScope,
+  getServicesInScope,
 } from "../controllers/serviceController.js";
 import { authMiddleware } from "../middleware/authMiddleware.js";
 
@@ -18,11 +20,16 @@ const router = Router();
 router.get("/", getServices);
 // Declared before /:id so "count" is not captured as an id param.
 router.get("/count", getServicesCount);
+// Declared before /:id so "scope" is not captured as an id param.
+router.get("/scope", getServicesInScope);
 router.get("/:id", getService);
 
 router.use(authMiddleware);
 
 router.post("/", createNewService);
+// Declared before /:id so a numeric id is not captured — reorder targets a
+// scope, not a single service. Protected by the same admin JWT middleware.
+router.put("/reorder", reorderServicesInScope);
 router.put("/:id", updateExistingService);
 router.patch("/:id/status", updateExistingServiceStatus);
 router.delete("/:id", removeService);

@@ -89,7 +89,10 @@ async function hydrateServices(rows) {
 // deterministic across LIMIT/OFFSET pages — without it, equal-keyed rows can
 // shift between page 1 and page 2 when "View More" appends.
 const SORT_OPTIONS = {
-  menu: "s.display_order ASC, s.name ASC, s.id ASC", // default catalog order
+  // Persisted admin order wins over any name-based ordering. Tiebreak on id
+  // (never name) so rows sharing a display_order — e.g. rows from a scope the
+  // backfill has not healed yet — paginate deterministically across pages.
+  menu: "s.display_order ASC, s.id ASC", // default catalog order
   nameAsc: "s.name ASC, s.id ASC",
   nameDesc: "s.name DESC, s.id ASC",
   priceAsc: "COALESCE(LEAST(s.price, effective_min_price), s.price, effective_min_price) ASC NULLS LAST, s.display_order ASC, s.id ASC",
@@ -109,7 +112,7 @@ export async function findServices(filters = {}) {
   const whereClause =
     conditions.length > 0 ? ` WHERE ${conditions.join(" AND ")}` : "";
   const [rows] = await pool.query(
-    `${SERVICE_SELECT}${whereClause} ORDER BY s.display_order, s.name`,
+    `${SERVICE_SELECT}${whereClause} ORDER BY s.display_order ASC, s.id ASC`,
     values,
   );
   return hydrateServices(rows);
@@ -421,10 +424,22 @@ export async function createService(data) {
   try {
     await connection.beginTransaction();
 
+    // New services append AFTER the current end of their category +
+    // subcategory scope — never left at the display_order default of 0,
+    // which would otherwise jump a brand-new service to the front of an
+    // already-ordered list. The scope is (category_id, sub_category_id):
+    // NULL sub_category_id rows form their own scope.
+    const [[orderRow]] = await connection.query(
+      `SELECT COALESCE(MAX(display_order), -1) AS max_order FROM services
+       WHERE category_id = ? AND sub_category_id IS NOT DISTINCT FROM ?`,
+      [data.category_id, data.sub_category_id ?? null],
+    );
+    const nextDisplayOrder = Number(orderRow.max_order) + 1;
+
     const [result] = await connection.query(
       `INSERT INTO services
-        (slug, category_id, sub_category_id, name, audience, description, pricing_type, price, price_range, duration, image, image_url, is_active)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+        (slug, category_id, sub_category_id, name, audience, description, pricing_type, price, price_range, duration, image, image_url, display_order, is_active)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
       [
         data.slug,
         data.category_id,
@@ -438,6 +453,7 @@ export async function createService(data) {
         data.duration ?? null,
         data.image ?? null,
         data.image_url ?? null,
+        nextDisplayOrder,
         Boolean(data.is_active),
       ],
     );
@@ -463,6 +479,60 @@ export async function updateService(id, data) {
 
     const fields = [];
     const values = [];
+
+    // Lock the row first so scope-migration (below) and the field update are
+    // consistent against concurrent reorders/moves.
+    await connection.query(`SELECT id FROM services WHERE id = ? FOR UPDATE`, [id]);
+
+    // Scope migration: when category/subcategory assignment changes, remove
+    // the service from the OLD ordering scope (renormalizing the gap it
+    // leaves) and append it to the END of the NEW scope (MAX + 1). Only
+    // display_order is ever written here — all other fields flow through the
+    // generic field list below.
+    const isScopeChange =
+      (data.category_id !== undefined && data.category_id !== null) ||
+      data.sub_category_id !== undefined;
+    if (isScopeChange) {
+      const [currentRows] = await connection.query(
+        `SELECT category_id, sub_category_id FROM services WHERE id = ?`,
+        [id],
+      );
+      const current = currentRows[0];
+      if (current) {
+        const nextCategoryId = data.category_id !== undefined ? data.category_id : current.category_id;
+        const nextSubCategoryId = data.sub_category_id !== undefined ? data.sub_category_id : current.sub_category_id;
+        const scopeChanged =
+          Number(nextCategoryId) !== Number(current.category_id) ||
+          (nextSubCategoryId ?? null) !== (current.sub_category_id ?? null);
+
+        if (scopeChanged) {
+          // 1. Close the gap in the old scope: renormalize the remaining
+          //    services to 0..n-1 so the column stays dense.
+          const [remaining] = await connection.query(
+            `SELECT id FROM services
+             WHERE category_id = ? AND sub_category_id IS NOT DISTINCT FROM ?
+               AND id != ?
+             ORDER BY display_order ASC, id ASC`,
+            [current.category_id, current.sub_category_id ?? null, id],
+          );
+          for (let position = 0; position < remaining.length; position += 1) {
+            await connection.query(
+              `UPDATE services SET display_order = ? WHERE id = ?`,
+              [position, remaining[position].id],
+            );
+          }
+
+          // 2. Append to the end of the new scope (MAX + 1).
+          const [[orderRow]] = await connection.query(
+            `SELECT COALESCE(MAX(display_order), -1) AS max_order FROM services
+             WHERE category_id = ? AND sub_category_id IS NOT DISTINCT FROM ?`,
+            [nextCategoryId, nextSubCategoryId ?? null],
+          );
+          fields.push("display_order = ?");
+          values.push(Number(orderRow.max_order) + 1);
+        }
+      }
+    }
 
     if (data.name !== undefined) {
       fields.push("name = ?");
@@ -546,8 +616,178 @@ export async function updateService(id, data) {
 }
 
 export async function deleteService(id) {
-  const [result] = await pool.query(`DELETE FROM services WHERE id = ?`, [id]);
-  return result.affectedRows > 0;
+  // Normalize in a transaction: after the delete, close the gap the removed
+  // service leaves in its category+subcategory scope so the remaining orders
+  // stay contiguous (0..n-1). Only display_order is written.
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+
+    const [currentRows] = await connection.query(
+      `SELECT category_id, sub_category_id FROM services WHERE id = ?`,
+      [id],
+    );
+    const current = currentRows[0];
+    if (!current) return false;
+
+    const [result] = await connection.query(`DELETE FROM services WHERE id = ?`, [id]);
+    if (result.affectedRows === 0) return false;
+
+    const [remaining] = await connection.query(
+      `SELECT id, display_order FROM services
+       WHERE category_id = ? AND sub_category_id IS NOT DISTINCT FROM ?
+       ORDER BY display_order ASC, id ASC`,
+      [current.category_id, current.sub_category_id ?? null],
+    );
+    for (let position = 0; position < remaining.length; position += 1) {
+      // Skip no-op writes when the value already matches.
+      if (Number(remaining[position].display_order) === position) continue;
+      await connection.query(
+        `UPDATE services SET display_order = ? WHERE id = ?`,
+        [position, remaining[position].id],
+      );
+    }
+
+    await connection.commit();
+    return true;
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+// Reorder every service of ONE category+subcategory scope in a single
+// transaction.
+//
+// `items` must be a complete re-statement of this scope's service ids (a
+// bijection against what's currently in the database) — never a partial
+// subset. That's what lets validation be a simple set-equality check, and it
+// guarantees the column stays densely assigned (0..n-1) after every call.
+//
+// Guarantees (mirrors reorderSubCategories in Category.js):
+//   - categoryId and subCategoryId must resolve to real rows, and the sub
+//     must belong to the category
+//   - every id must belong to THIS scope (no cross-scope reorder)
+//   - no duplicate ids, no unknown ids, no missing ids
+//   - only display_order is written — id/slug/name/prices/variants/branches
+//     and every category/subcategory mapping are completely untouched
+//   - all-or-nothing: any validation failure rolls back with zero writes
+//
+// Returns { status } where status is one of "reordered" | "invalid-items" |
+// "duplicate-ids" | "not-found" | "sub-mismatch" | "set-mismatch" — the
+// controller maps each to an honest 400/404 instead of a false "order
+// updated" success.
+export async function reorderServices(categoryId, subCategoryId, items) {
+  if (!Array.isArray(items) || items.length === 0) {
+    return { status: "invalid-items" };
+  }
+
+  const parsedItems = items.map((item) => ({
+    id: Number(item?.id),
+    displayOrder: Number(item?.displayOrder),
+  }));
+  const hasInvalidShape = parsedItems.some(
+    ({ id, displayOrder }) =>
+      !Number.isInteger(id) ||
+      id <= 0 ||
+      !Number.isInteger(displayOrder) ||
+      displayOrder < 0,
+  );
+  if (hasInvalidShape) {
+    return { status: "invalid-items" };
+  }
+
+  const submittedIds = parsedItems.map((item) => item.id);
+  if (new Set(submittedIds).size !== submittedIds.length) {
+    return { status: "duplicate-ids" };
+  }
+
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+
+    // Resolve the scope identifiers first: unknown category/subcategory, or a
+    // sub-category owned by a different category, is rejected before any
+    // lock is taken.
+    const [categoryRows] = await connection.query(
+      `SELECT id FROM categories WHERE id = ?`,
+      [categoryId],
+    );
+    if (categoryRows.length === 0) {
+      await connection.rollback();
+      return { status: "not-found" };
+    }
+    if (subCategoryId != null) {
+      const [subRows] = await connection.query(
+        `SELECT id FROM sub_categories WHERE id = ? AND category_id = ?`,
+        [subCategoryId, categoryId],
+      );
+      if (subRows.length === 0) {
+        await connection.rollback();
+        return { status: "sub-mismatch" };
+      }
+    }
+
+    // Lock this scope's service rows for the duration of the reorder so a
+    // concurrent reorder/create/delete/move cannot interleave writes.
+    // Row-level FOR UPDATE also blocks updateService()'s scope migration
+    // until this transaction commits.
+    const [rows] = await connection.query(
+      `SELECT id FROM services
+       WHERE category_id = ? AND sub_category_id IS NOT DISTINCT FROM ?
+       FOR UPDATE`,
+      [categoryId, subCategoryId ?? null],
+    );
+    if (rows.length === 0) {
+      await connection.rollback();
+      return { status: "not-found" };
+    }
+
+    const existingIds = rows.map((row) => Number(row.id));
+    const existingIdSet = new Set(existingIds);
+    const submittedIdSet = new Set(submittedIds);
+    const isExactMatch =
+      existingIds.length === submittedIds.length &&
+      existingIds.every((id) => submittedIdSet.has(id)) &&
+      submittedIds.every((id) => existingIdSet.has(id));
+    // Rejects a foreign-scope id slipping in AND a partial list that would
+    // leave some of this scope's services un-ordered.
+    if (!isExactMatch) {
+      await connection.rollback();
+      return { status: "set-mismatch" };
+    }
+
+    for (const { id, displayOrder } of parsedItems) {
+      await connection.query(
+        `UPDATE services SET display_order = ? WHERE id = ? AND category_id = ?`,
+        [displayOrder, id, categoryId],
+      );
+    }
+
+    await connection.commit();
+    return { status: "reordered", services: existingIds.length };
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+// Fetch one ordering scope (category_id + sub_category_id) in canonical
+// order — used by the admin UI after Category + Subcategory selection so it
+// renders exactly what the database considers the current order (display_order
+// ASC, id ASC), including services the filters would otherwise hide.
+export async function findServicesInScope(categoryId, subCategoryId) {
+  const [rows] = await pool.query(
+    `${SERVICE_SELECT}
+     WHERE s.category_id = ? AND s.sub_category_id IS NOT DISTINCT FROM ?
+     ORDER BY s.display_order ASC, s.id ASC`,
+    [categoryId, subCategoryId ?? null],
+  );
+  return hydrateServices(rows);
 }
 
 export async function updateServiceStatus(id, isActive) {

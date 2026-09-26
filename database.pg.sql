@@ -131,14 +131,21 @@ CREATE TABLE IF NOT EXISTS services (
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Idempotent for pre-existing databases created before display_order existed
+-- (same treatment sub_categories gets above).
+ALTER TABLE services ADD COLUMN IF NOT EXISTS display_order INTEGER NOT NULL DEFAULT 0;
+
 CREATE INDEX IF NOT EXISTS idx_services_category ON services(category_id);
 CREATE INDEX IF NOT EXISTS idx_services_sub_category ON services(sub_category_id);
 CREATE INDEX IF NOT EXISTS idx_services_audience ON services(audience);
 CREATE INDEX IF NOT EXISTS idx_services_active ON services(is_active);
--- Covers the public Services page's default ordering (display_order, name)
--- so Postgres can satisfy ORDER BY + LIMIT from the index instead of a sort.
-CREATE INDEX IF NOT EXISTS idx_services_display_order_name
-  ON services(display_order, name);
+-- Covers the admin sub-category service listing order (per scope, dense).
+CREATE INDEX IF NOT EXISTS idx_services_scope_order
+  ON services(category_id, sub_category_id, display_order, id);
+-- Covers the public Services page's default ordering (display_order, id) so
+-- Postgres can satisfy ORDER BY + LIMIT from the index instead of a sort.
+CREATE INDEX IF NOT EXISTS idx_services_display_order
+  ON services(display_order, id);
 -- Trailing-index coverage for branch filtering via service_branches
 -- (branch_id index exists; this adds the reverse direction used by EXISTS
 -- lookups per service when the planner prefers service_id leading).

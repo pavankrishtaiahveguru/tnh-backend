@@ -13,6 +13,7 @@
     "seed:catalog": "node scripts/seedCatalog.mjs",
     "backfill:subcategories": "node scripts/backfillServiceSubCategories.mjs",
     "backfill:subcategory-order": "node scripts/backfillSubCategoryOrder.mjs",
+    "backfill:service-order": "node scripts/backfillServiceOrder.mjs",
     "db:migrate": "node src/database/migrate.js",
     "db:seed": "node src/database/seed.js"
   },

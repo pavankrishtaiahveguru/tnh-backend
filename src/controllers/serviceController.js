@@ -12,6 +12,8 @@ import {
   deleteService,
   updateServiceStatus,
   normalizeServiceSlug,
+  reorderServices,
+  findServicesInScope,
 } from "../models/Service.js";
 import {
   findCategoryBySlug,
@@ -394,6 +396,116 @@ export async function removeService(req, res) {
 
     await deleteService(service.id);
     return res.status(200).json({ success: true, message: "Service deleted" });
+  });
+}
+
+// GET /api/services/scope?categoryId=&subCategoryId= — the ordered list of
+// services in one category+subcategory scope (display_order ASC, id ASC).
+// Powers the admin reorder panel so it renders the exact current order the
+// database holds, regardless of any text/branch/audience filters.
+export async function getServicesInScope(req, res) {
+  return handle(res, async () => {
+    const { categoryId, subCategoryId } = req.query;
+
+    const categoryIdNum = Number(categoryId);
+    if (!Number.isInteger(categoryIdNum) || categoryIdNum <= 0) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Valid categoryId is required" });
+    }
+    const hasSub =
+      subCategoryId !== undefined && subCategoryId !== "" && subCategoryId !== "null";
+    const subCategoryIdNum = hasSub ? Number(subCategoryId) : null;
+    if (hasSub && (!Number.isInteger(subCategoryIdNum) || subCategoryIdNum <= 0)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid subCategoryId" });
+    }
+
+    const services = await findServicesInScope(categoryIdNum, subCategoryIdNum);
+    return res.status(200).json({ success: true, data: { services } });
+  });
+}
+
+// PUT /api/services/reorder — persist the display order of ONE category +
+// subcategory scope in a single request. Body:
+//   { categoryId, subCategoryId, items: [{ id, displayOrder }, ...] }
+// The items list must be the COMPLETE set of services currently in that
+// scope (the backend rejects partial/foreign/duplicate/unknown ids). All
+// writes happen inside one transaction with row locks — any validation
+// failure rolls back with zero changes.
+export async function reorderServicesInScope(req, res) {
+  return handle(res, async () => {
+    const { categoryId, subCategoryId, items } = req.body ?? {};
+
+    const categoryIdNum = Number(categoryId);
+    if (!Number.isInteger(categoryIdNum) || categoryIdNum <= 0) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Valid categoryId is required" });
+    }
+    const hasSub = subCategoryId !== undefined && subCategoryId !== null && subCategoryId !== "";
+    const subCategoryIdNum = hasSub ? Number(subCategoryId) : null;
+    if (hasSub && (!Number.isInteger(subCategoryIdNum) || subCategoryIdNum <= 0)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid subCategoryId" });
+    }
+
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "items must be a non-empty array of { id, displayOrder }",
+      });
+    }
+
+    const result = await reorderServices(categoryIdNum, subCategoryIdNum, items);
+
+    switch (result.status) {
+      case "reordered":
+        break;
+      case "invalid-items":
+        return res.status(400).json({
+          success: false,
+          message:
+            "Each item needs a valid service id and a non-negative displayOrder",
+        });
+      case "duplicate-ids":
+        return res.status(400).json({
+          success: false,
+          message: "items contains duplicate service ids",
+        });
+      case "not-found":
+        return res.status(404).json({
+          success: false,
+          message: "Category or service scope not found",
+        });
+      case "sub-mismatch":
+        return res.status(400).json({
+          success: false,
+          message: "This sub-category does not belong to the selected category",
+        });
+      case "set-mismatch":
+        return res.status(400).json({
+          success: false,
+          message:
+            "items must include every service currently in this category + sub-category, and only services that belong to it",
+        });
+      default:
+        return res.status(500).json({
+          success: false,
+          message: "Something went wrong. Please try again.",
+        });
+    }
+
+    // Fresh from the DB so the admin UI can trust the server's confirmed
+    // order rather than assuming its own optimistic update landed.
+    const services = await findServicesInScope(categoryIdNum, subCategoryIdNum);
+    return res.status(200).json({
+      success: true,
+      message: "Service order updated",
+      data: { services },
+    });
   });
 }
 
