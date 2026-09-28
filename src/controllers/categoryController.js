@@ -13,6 +13,7 @@ import {
   moveCategory,
   reorderSubCategories,
 } from "../models/Category.js";
+import pool from "../config/database.js";
 
 async function handle(res, fn) {
   try {
@@ -28,7 +29,32 @@ async function handle(res, fn) {
 
 export async function getCategories(req, res) {
   return handle(res, async () => {
-    const categories = await findCategories();
+    // Optional `branch` query param (public Services page). When present it
+    // must resolve to a real branch slug — per-branch category lists must
+    // never be built from an unvalidated string. Absent (admin) → unscoped,
+    // exactly as before.
+    let branchSlug = null;
+    const branchParam = req.query?.branch;
+    if (branchParam !== undefined && branchParam !== "" && branchParam !== "all" && branchParam !== "both") {
+      const [branchRows] = await pool.query(
+        `SELECT slug FROM branches WHERE slug = ? AND is_active = TRUE LIMIT 1`,
+        [String(branchParam)],
+      );
+      if (branchRows.length === 0) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Unknown branch" });
+      }
+      branchSlug = branchRows[0].slug;
+    }
+
+    // `public=1` marks the PUBLIC Services page listing: zero-service
+    // categories (and zero-service sub-categories) are hidden — branch-
+    // scoped when `branch` is also present, active-counted otherwise. The
+    // admin listing never sends this and keeps its full catalog view.
+    const hideEmpty = req.query?.public === "1" || branchSlug !== null;
+
+    const categories = await findCategories(branchSlug, { hideEmpty });
     return res.status(200).json({ success: true, data: { categories } });
   });
 }

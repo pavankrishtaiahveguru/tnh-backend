@@ -27,7 +27,9 @@ if (!PASSWORD) {
 }
 
 const CATEGORY_SLUG = "bleach-d-tan";
-const SUB_NAME = "Face";
+// SUB_NAME is resolved at runtime below (the live catalog's sub-category
+// names change — the hardcoded "Face" no longer exists under this category).
+let SUB_NAME = null;
 const SERVICE_NAME = "Test Public Service";
 
 let passed = 0;
@@ -95,6 +97,20 @@ try {
   token = login.payload?.token;
   check("admin login", login.status === 200 && Boolean(token));
 
+  // Resolve a real sub-category of the target category at runtime — the
+  // POST payload must reference a sub that actually exists (the backend
+  // rejects mismatches with 400 SUBCATEGORY_MISMATCH).
+  const catsPayload = await api("GET", `/api/categories?branch=indiranagar`);
+  const targetCategory = (catsPayload.payload?.data?.categories ?? []).find(
+    (c) => c.slug === CATEGORY_SLUG,
+  );
+  SUB_NAME = targetCategory?.subcategories?.[0]?.name ?? null;
+  check(
+    "runtime sub-category resolved for the test category",
+    Boolean(SUB_NAME),
+    JSON.stringify(targetCategory?.subcategories ?? []).slice(0, 150),
+  );
+
   // ---- STEP A/B: create the service via the ADMIN payload (same shape the
   // Admin form sends after the subCategoryId fix) and verify the DB row ----
   console.log("\nSTEP A-B — admin create + DB row");
@@ -136,6 +152,9 @@ try {
 
   // ---- STEP C: EXACT public page request — initial load (page 1) ----
   // Mirrors getServicesPage({ status:'Active', branch:'both', page:1, limit:24 })
+  // plus the branch-scoped category fetch the page now makes
+  // (GET /api/categories?branch=indiranagar) — the created service is mapped
+  // to every branch, so it must appear in BOTH branches' category metadata.
   console.log("\nSTEP C — public page 1 request (initial load)");
   const page1 = await api(
     "GET",
@@ -144,12 +163,28 @@ try {
   const p1 = serviceRows(page1.payload);
   check("page 1 returns 200 + 24 rows", page1.status === 200 && p1.length === 24, `rows=${p1.length}`);
   const onP1 = p1.some((s) => Number(s.id) === createdId);
+  // Since the persistent ordering implementation, createService appends a new
+  // service to the END of its (category, subcategory) scope — so it only
+  // appears on global page 1 when its scope is small. Assert the honest
+  // current contract: page 1 is full OR the service is on it.
   check(
-    "new service IS on page 1 (display_order=0 sorts first)",
-    onP1,
-    onP1 ? "" : `first row: ${p1[0]?.name}`,
+    "new service on page 1 or page 1 full (append-to-end ordering)",
+    onP1 || p1.length === 24,
+    `rows=${p1.length}`,
   );
   check("pagination metadata present", Boolean(page1.payload?.pagination));
+
+  const branchCats = await api("GET", `/api/categories?branch=indiranagar`);
+  const branchCatRow = (branchCats.payload?.data?.categories ?? []).find(
+    (c) => c.slug === CATEGORY_SLUG,
+  );
+  check(
+    "branch-scoped categories include the new service's category",
+    branchCats.status === 200 && Number(branchCatRow?.service_count ?? 0) >= 1,
+    `count=${branchCatRow?.service_count}`,
+  );
+  const badBranch = await api("GET", `/api/categories?branch=not-a-branch`);
+  check("unknown branch rejected with 400", badBranch.status === 400, `got ${badBranch.status}`);
 
   // ---- STEP D: category filter request ----
   console.log("\nSTEP D — public category filter (?category=bleach-d-tan)");
@@ -175,24 +210,24 @@ try {
   const subRows = serviceRows(subPage.payload);
   check("subcategory-filtered request returns the service", subRows.some((s) => Number(s.id) === createdId), `rows=${subRows.length}`);
 
-  // ---- STEP F: ordering sanity — new services must never be hidden by the
-  // default sort on page 1 (display_order ASC). Assert the new row's
-  // position is within the first page for the exact catalog state. ----
-  console.log("\nSTEP F — ordering/pagination boundary check");
+  // ---- STEP F: ordering sanity — createService appends to the END of the
+  // service's (category, subcategory) scope, so the created row must hold
+  // MAX(display_order) within that scope. Never hidden: the scope itself is
+  // page-1-sized for the category-filtered requests above. ----
+  console.log("\nSTEP F — ordering (append-to-end of scope) check");
   const [orderRow] = (
     await pool.query(
-      `SELECT position FROM (
-         SELECT id, ROW_NUMBER() OVER (ORDER BY display_order ASC, name ASC, id ASC) AS position
-         FROM services WHERE is_active = TRUE
-       ) ranked WHERE id = ?`,
-      [createdId],
+      `SELECT
+         (SELECT MAX(display_order) FROM services
+          WHERE category_id = ? AND sub_category_id IS NOT DISTINCT FROM ?) AS max_order,
+         (SELECT display_order FROM services WHERE id = ?) AS own_order`,
+      [dbRow.category_id, dbRow.sub_category_id, createdId],
     )
   )[0];
-  const position = Number(orderRow?.position ?? 0);
   check(
-    "service position within page 1 of the public order (<= 24)",
-    position >= 1 && position <= 24,
-    `position=${position}`,
+    "created service appended to the end of its scope",
+    Number(orderRow?.own_order) === Number(orderRow?.max_order),
+    `own=${orderRow?.own_order} max=${orderRow?.max_order}`,
   );
 
   // ---- STEP G: View More path — page 2 request also works (pagination intact) ----

@@ -3,27 +3,105 @@
 // ==================================================
 import pool from "../config/database.js";
 
-export async function findCategories() {
-  const [categories] = await pool.query(
-    `SELECT c.id, c.slug, c.name, c.description, c.icon, c.image, c.image_url,
-            c.display_order, c.is_active, c.created_at, c.updated_at,
-            COUNT(DISTINCT s.id) AS service_count
-     FROM categories c
+// Shared SELECT/JOIN for the category listing. The two variants differ only
+// in how the service_count is computed, so the column list stays in one place.
+const CATEGORY_SELECT_COLUMNS = `
+  SELECT c.id, c.slug, c.name, c.description, c.icon, c.image, c.image_url,
+         c.display_order, c.is_active, c.created_at, c.updated_at,
+`;
+
+// service_count via LEFT JOIN (unscoped variant). COUNT(DISTINCT s.id)
+// tolerates the sub_categories cross join.
+const CATEGORY_COUNT_JOIN = `
      LEFT JOIN sub_categories sc ON sc.category_id = c.id
      LEFT JOIN services s
        ON s.category_id = c.id OR s.sub_category_id = sc.id
+`;
+
+// Branch-scoped ACTIVE-service count via LATERAL (public view). Counts each
+// category's ACTIVE services that are mapped to the given branch through the
+// existing services + service_branches + branches relationship (parameterized
+// slug — no hardcoded category/branch mapping). When no branch is passed the
+// same LATERAL counts ACTIVE services across branches (the "All Branches"
+// public view), so zero-service categories can be hidden consistently.
+const CATEGORY_COUNT_ACTIVE_LATERAL = (branchSlug) => `
+     LEFT JOIN LATERAL (
+       SELECT COUNT(DISTINCT s.id) AS service_count
+       FROM services s
+       WHERE (s.category_id = c.id OR s.sub_category_id IN (
+                SELECT sc2.id FROM sub_categories sc2 WHERE sc2.category_id = c.id
+              ))
+         AND s.is_active = TRUE
+         ${branchSlug ? `AND EXISTS (
+           SELECT 1 FROM service_branches sb
+           INNER JOIN branches b ON b.id = sb.branch_id
+           WHERE sb.service_id = s.id AND b.slug = ?
+         )` : ""}
+     ) svc ON TRUE
+`;
+
+export async function findCategories(branchSlug, { hideEmpty = false } = {}) {
+  // Public views (branch-scoped, or the zero-count-hiding "All Branches" list)
+  // count ACTIVE services through the LATERAL above. The admin listing (no
+  // branch, no hiding) keeps its legacy JOIN count over ALL services.
+  const useActiveCount = Boolean(branchSlug) || hideEmpty;
+  const countExpr = useActiveCount
+    ? `COALESCE(svc.service_count, 0) AS service_count`
+    : `COUNT(DISTINCT s.id) AS service_count`;
+  const fromClause = useActiveCount
+    ? CATEGORY_COUNT_ACTIVE_LATERAL(branchSlug)
+    : CATEGORY_COUNT_JOIN;
+
+  const values = branchSlug ? [branchSlug] : [];
+  const [categories] = await pool.query(
+    `${CATEGORY_SELECT_COLUMNS}
+            ${countExpr}
+     FROM categories c
+     ${fromClause}
      GROUP BY c.id, c.slug, c.name, c.description, c.icon, c.image,
-              c.image_url, c.display_order, c.is_active, c.created_at, c.updated_at
+              c.image_url, c.display_order, c.is_active, c.created_at, c.updated_at${useActiveCount ? ", svc.service_count" : ""}
      ORDER BY display_order, id`,
+    values,
   );
 
   if (categories.length === 0) return [];
 
+  // Per-sub-category service counts. Branch-scoped when a branch is given;
+  // active-only when hiding empties without a branch; legacy COUNT(*) for
+  // the admin listing. Filters mirror the category count so chips/counts
+  // always agree with the grid.
+  const categoryIds = categories.map((c) => c.id);
+  const subQuery = branchSlug
+    ? `SELECT sc.id, sc.category_id, sc.slug, sc.name, sc.display_order,
+              (SELECT COUNT(DISTINCT s.id)
+               FROM services s
+               INNER JOIN service_branches sb ON sb.service_id = s.id
+               INNER JOIN branches b ON b.id = sb.branch_id
+               WHERE s.sub_category_id = sc.id
+                 AND s.is_active = TRUE
+                 AND b.slug = ?) AS service_count
+       FROM sub_categories sc
+       WHERE sc.category_id = ANY(?::int[])
+       ORDER BY sc.category_id, sc.display_order ASC, sc.id ASC`
+    : hideEmpty
+      ? `SELECT sc.id, sc.category_id, sc.slug, sc.name, sc.display_order,
+                (SELECT COUNT(*) FROM services s
+                 WHERE s.sub_category_id = sc.id AND s.is_active = TRUE) AS service_count
+         FROM sub_categories sc
+         WHERE sc.category_id = ANY(?::int[])
+         ORDER BY sc.category_id, sc.display_order ASC, sc.id ASC`
+      : `SELECT sc.id, sc.category_id, sc.slug, sc.name, sc.display_order,
+                (SELECT COUNT(*) FROM services s WHERE s.sub_category_id = sc.id) AS service_count
+         FROM sub_categories sc
+         ORDER BY sc.category_id, sc.display_order ASC, sc.id ASC`;
+
   const [subCategories] = await pool.query(
-    `SELECT sc.id, sc.category_id, sc.slug, sc.name, sc.display_order,
-            (SELECT COUNT(*) FROM services s WHERE s.sub_category_id = sc.id) AS service_count
-     FROM sub_categories sc
-     ORDER BY sc.category_id, sc.display_order ASC, sc.id ASC`,
+    subQuery,
+    branchSlug
+      ? [branchSlug, categoryIds]
+      : hideEmpty
+        ? [categoryIds]
+        : [],
   );
 
   const subsByCategory = new Map();
@@ -40,11 +118,23 @@ export async function findCategories() {
     });
   }
 
-  return categories.map((category) => ({
+  const mapped = categories.map((category) => ({
     ...category,
-    subcategories: subsByCategory.get(category.id) ?? [],
+    // Public views drop sub-categories with zero services in scope so chips
+    // never render an empty group; the admin listing keeps every sub.
+    subcategories: (subsByCategory.get(category.id) ?? []).filter(
+      (sub) => !hideEmpty || sub.service_count > 0,
+    ),
     service_count: Number(category.service_count),
   }));
+
+  // THE RULE: public listings render a category only when its service count
+  // (already branch- and status-scoped above) is greater than 0. Categories
+  // with no available services are hidden entirely; the "All Services" entry
+  // is prepended client-side and unaffected. Admin listings keep every row.
+  return hideEmpty
+    ? mapped.filter((category) => category.service_count > 0)
+    : mapped;
 }
 
 export async function findCategoryById(id) {
