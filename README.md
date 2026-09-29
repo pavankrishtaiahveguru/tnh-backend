@@ -1,10 +1,10 @@
 # The Nail Hue — Backend
 
-Node.js + Express REST API powering The Nail Hue salon website (`tnh-salon`) and its admin panel. It serves the service catalogue and branches, handles admin authentication, image uploads, Excel catalogue import/export, and proxies the AI assistant to the Cheerio AI Agent.
+Node.js + Express REST API powering The Nail Hue salon website (`tnh-salon`) and its admin panel. It serves the service catalogue and branches, handles admin authentication, image uploads, and Excel catalogue import/export.
 
 ## Overview
 
-- **Public API** — services catalogue (with filters, search, pagination), categories/sub-categories, branches, AI assistant chat.
+- **Public API** — services catalogue (with filters, search, pagination), categories/sub-categories, branches.
 - **Admin API** — JWT-protected CRUD for services and categories, branch updates, Cloudinary image uploads, and reference-format Excel export/import of the catalogue.
 - **Database** — PostgreSQL on [Neon](https://neon.tech) via raw SQL (`pg`, no ORM).
 
@@ -32,12 +32,6 @@ Node.js + Express REST API powering The Nail Hue salon website (`tnh-salon`) and
 - Generic "invalid email or password" for unknown email, wrong password *and* inactive account — email existence is never revealed
 - `Authorization: Bearer <token>` middleware protects all admin routes
 
-### AI Agent
-- `POST /api/ai-agent/interact` — validates input, forwards `{ question, history, collectedData }` to the **Cheerio AI Agent** and returns a mapped response
-- Response mapping returns `answer`, `answers`, `quickReplies`, `context`, `collectedData`, `products`; internal `tokenUsage` is intentionally stripped
-- **Timeout handling**: 15s `AbortController` timeout → `504`; Cheerio 429 → `429`; other failures → `502`
-- The Cheerio API key never leaves the server process
-
 ### Uploads
 - `POST /api/upload/image` — admin-only image upload to **Cloudinary** (5 MB max, `image/*` only, folder whitelist: `categories`, `services`)
 
@@ -52,7 +46,6 @@ Node.js + Express REST API powering The Nail Hue salon website (`tnh-salon`) and
 
 ### Error Handling
 - Per-controller `try/catch` wrappers; unexpected errors log server-side and return a generic 500 — no SQL, stack traces or internals leak to clients
-- AI controller maps external failures to `400` (validation), `429` (upstream rate limit), `502` (upstream error), `504` (upstream timeout)
 - Multer upload errors mapped to friendly 400 messages
 
 ## Tech Stack
@@ -82,11 +75,11 @@ Express API (src/server.js)
         ▼
 Controllers (src/controllers)      ← request validation + response shaping
         ▼
-Services (src/services)            ← business logic (auth, Cheerio, Excel)
+Services (src/services)            ← business logic (auth, Excel)
         ▼
 Models (src/models)                ← raw SQL via src/config/database.js
         ▼
-PostgreSQL (Neon)        External: Cheerio AI Agent, Cloudinary
+PostgreSQL (Neon)        External: Cloudinary
 ```
 
 ## Project Structure
@@ -95,12 +88,12 @@ PostgreSQL (Neon)        External: Cheerio AI Agent, Cloudinary
 tnh-backend/
 ├── src/
 │   ├── config/            # database.js (pg pool + compat layer), cloudinary.js
-│   ├── controllers/       # auth, service, category, branch, upload, catalog, aiAgent
+│   ├── controllers/       # auth, service, category, branch, upload, catalog
 │   ├── middleware/        # authMiddleware.js (JWT Bearer)
 │   ├── models/            # raw SQL: Admin, Service, Category, Branch
 │   ├── routes/            # Express routers per resource
 │   ├── seed/              # adminSeeder.js
-│   ├── services/          # authService, cheerioAiService, catalogExcelService
+│   ├── services/          # authService, catalogExcelService
 │   ├── database/          # migrate.js, seed.js
 │   ├── utils/             # perfLog.js (dev-only API timing)
 │   └── server.js          # entry point
@@ -139,51 +132,6 @@ All routes verified against `src/routes`:
 | POST | `/api/upload/image` | ✓ | Upload image to Cloudinary (multipart field `image`) |
 | GET | `/api/catalog/export` | ✓ | Download the catalogue as reference `.xlsx` |
 | POST | `/api/catalog/import` | ✓ | Import a reference `.xlsx` (multipart field `file`, ≤ 10 MB) |
-| POST | `/api/ai-agent/interact` | — | AI assistant proxy to Cheerio (see below) |
-
-### AI Agent endpoint
-
-`POST /api/ai-agent/interact`
-
-Request:
-
-```json
-{
-  "question": "Do you do gel extensions?",
-  "history": [{ "role": "user", "content": "Hi" }],
-  "collectedData": {}
-}
-```
-
-Validation: `question` is a required non-empty string, `history` must be an array, `collectedData` must be an object — otherwise `400`.
-
-Response (200):
-
-```json
-{
-  "success": true,
-  "answer": "…",
-  "answers": ["…"],
-  "quickReplies": ["…"],
-  "context": [],
-  "collectedData": {},
-  "products": []
-}
-```
-
-Architecture:
-
-```
-TNH Frontend
-      │  POST /api/ai-agent/interact
-      ▼
-TNH Backend ── (x-api-key, server-side only) ──▶  Cheerio AI Agent
-      ▲                                              │
-      └────────────── mapped JSON response ──────────┘
-```
-
-The Cheerio credential (`CHEERIO_AI_API_KEY`) is read only inside `src/services/cheerioAiService.js` and is never sent to the frontend. Requests abort after 15 seconds.
-
 ## Database
 
 - **PostgreSQL**, hosted on [Neon](https://neon.tech) (serverless). Use the **pooled** connection string (`-pooler` host) for application traffic.
@@ -237,8 +185,6 @@ Copy `.env.example` to `.env`. Names only — fill in your own values; never com
 | `ADMIN_NAME` / `ADMIN_EMAIL` / `ADMIN_PASSWORD` | Credentials for the admin seeder |
 | `CLOUDINARY_CLOUD_NAME` / `CLOUDINARY_API_KEY` / `CLOUDINARY_API_SECRET` | Cloudinary upload credentials |
 | `CLOUDINARY_FOLDER` | Root Cloudinary folder (default `tnh-salon`) |
-| `CHEERIO_AI_API_URL` | Cheerio AI Agent endpoint URL |
-| `CHEERIO_AI_API_KEY` | Cheerio API key — **server-side only**, never exposed to the frontend |
 
 ## Security
 
@@ -247,10 +193,10 @@ Actually implemented:
 - JWT-based admin auth; passwords hashed with bcrypt (10 rounds)
 - Generic auth failures that don't reveal whether an email exists
 - Strict CORS allow-list (`CLIENT_URL` origin, `credentials: true`)
-- JWT middleware on all mutating/admin routes; the AI endpoint is public but input-validated
+- JWT middleware on all mutating/admin routes
 - Upload restrictions (file size, MIME type, folder whitelist)
-- Server-side only secrets (`.env` git-ignored); the Cheerio key and database credentials never reach the client
-- Error sanitization — controllers return generic messages; no SQL, stack traces or `tokenUsage` leak out
+- Server-side only secrets (`.env` git-ignored); database credentials never reach the client
+- Error sanitization — controllers return generic messages; no SQL or stack traces leak out
 
 **Not implemented** (do not assume otherwise): rate limiting, request body schema validation libraries, HTTPS termination (handled by the hosting platform), refresh tokens.
 
@@ -260,14 +206,12 @@ Status codes actually returned by the code:
 
 | Code | When |
 |---|---|
-| `400` | Invalid input (login fields, AI payload, image file, status value, invalid import file) |
+| `400` | Invalid input (login fields, image file, status value, invalid import file) |
 | `401` | Missing/invalid/expired Bearer token; invalid login credentials |
 | `404` | Unknown route, service, category or branch |
 | `409` | Duplicate category name/slug on create |
-| `429` | Cheerio upstream rate limit |
 | `500` | Unexpected server error (generic message) |
-| `502` | Cloudinary upload failure; Cheerio upstream error |
-| `504` | Cheerio request timeout (15s) |
+| `502` | Cloudinary upload failure |
 
 ## Running Locally
 
@@ -300,7 +244,6 @@ The backend is designed to run as a plain Node process (`npm start`) with a Post
 - **`Failed to connect to the database`** — `DATABASE_URL` is missing/wrong, or Neon is unreachable. Use the pooled connection string and keep `sslmode=require`. The process exits on startup failure by design.
 - **Frontend can't reach the API (CORS)** — `CLIENT_URL` must exactly match the frontend origin (protocol + domain + port). Restart after changing `.env`.
 - **Admin login always fails with 401** — no admin seeded (`npm run seed:admin`) or `JWT_SECRET` differs between runs. `ADMIN_NAME/EMAIL/PASSWORD` must be set before seeding.
-- **`Cheerio AI Agent is not configured`** — `CHEERIO_AI_API_URL` / `CHEERIO_AI_API_KEY` missing in `.env`; the AI widget will surface a 502.
 - **Image upload returns 400** — file over 5 MB, non-image MIME type, or `type` not in `categories`/`services`.
 - **Import fails validation** — open the returned `errors` array (also shown in the admin UI); nothing was written because validation precedes the transaction.
 - **Migration re-run does nothing / is safe** — every statement in `database.pg.sql` is idempotent; re-running never drops data.
