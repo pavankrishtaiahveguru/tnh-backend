@@ -367,7 +367,10 @@ function readServicesSheet(workbook) {
 
 // Recomputes the derived price_range string ("₹600 – ₹800") from the
 // variant/size prices — the public site shows it when a service has no
-// single price.
+// single price. Equal min/max stays as "min – max" (never "min"): the
+// seeder copied the source catalog's ranges verbatim (e.g. "₹600 – ₹600"
+// for Scalp Scrub), so the collapsed form would rewrite that field on an
+// otherwise untouched re-import instead of round-tripping it unchanged.
 function buildPriceRange(priceType, variants) {
   if (priceType !== "size" && priceType !== "variant") return null;
   const prices = (variants ?? [])
@@ -378,7 +381,7 @@ function buildPriceRange(priceType, variants) {
   const max = Math.max(...prices);
   const format = (value) =>
     `₹${Number.isInteger(value) ? value : Number(value.toFixed(2))}`;
-  return min === max ? format(min) : `${format(min)} – ${format(max)}`;
+  return `${format(min)} – ${format(max)}`;
 }
 
 // Validates every row and returns parsed values. Nothing here touches the
@@ -481,8 +484,13 @@ export function validateServicesRows(rows, allBranches) {
         addError("Price should be blank for From services (use Starting Price)");
       }
     } else if (priceType === "size" || priceType === "variant") {
-      if (sPrice == null || mPrice == null) {
-        addError("S Price and M Price are required for Size/Variant services");
+      // At least ONE size/variant price is required — a 1-variant service is
+      // valid (the admin form allows it) and must round-trip through the
+      // workbook instead of being rejected for a blank M column.
+      if (sPrice == null && mPrice == null && lPrice == null) {
+        addError(
+          "At least one of S Price, M Price or L Price is required for Size/Variant services",
+        );
       }
       if (fixedPrice != null) {
         addError("Price should be blank for Size/Variant services");
@@ -490,24 +498,46 @@ export function validateServicesRows(rows, allBranches) {
     }
 
     // Build the variant list the database stores for size/variant pricing.
-    // Inverse of the positional export mapping: S/M/L columns are variant
-    // 1/2/3. For Variant services with explicit labels ("20 min / 30 min"),
-    // those labels are used; otherwise S/M/L labels are used.
+    // Exact inverse of the positional export mapping: S/M/L column 1/2/3
+    // carries variant 1/2/3's price and Variant Labels item 1/2/3 its label.
+    // Prices pair with labels in the order the prices appear (S, then M,
+    // then L), so a hand-blanked middle column keeps its neighbours' labels
+    // on the right prices instead of shifting them onto the wrong variant.
     const variants = [];
     if (priceType === "size" || priceType === "variant") {
-      const explicitLabels = variantLabels.filter(
-        (label) => !SIZE_KEYS.some((s) => s.toLowerCase() === label.toLowerCase()),
-      );
-      const prices = [sPrice, mPrice, lPrice].filter((p) => p != null);
-      const labels =
-        priceType === "variant" && explicitLabels.length > 0
-          ? explicitLabels
-          : SIZE_KEYS.slice(0, Math.max(1, prices.length));
-      labels.forEach((label, index) => {
-        if (prices[index] != null) {
-          variants.push({ label, price: prices[index] });
+      const isSizeWord = (label) =>
+        SIZE_KEYS.some((s) => s.toLowerCase() === label.toLowerCase());
+      const explicitLabels = variantLabels.filter((label) => !isSizeWord(label));
+      const columnPrices = [sPrice, mPrice, lPrice];
+      const filledCount = columnPrices.filter((p) => p != null).length;
+
+      if (priceType === "variant" && explicitLabels.length > 0) {
+        // Explicit labels must state exactly one label per filled price
+        // column — a mismatch would pair labels with the wrong prices or
+        // silently drop a price, so the file is rejected instead.
+        if (explicitLabels.length !== filledCount) {
+          addError(
+            `Variant Labels (${explicitLabels.length}) do not match the number of filled S/M/L prices (${filledCount})`,
+          );
         }
-      });
+        let labelIndex = 0;
+        columnPrices.forEach((price, index) => {
+          if (price == null) return;
+          variants.push({
+            label: explicitLabels[labelIndex] ?? SIZE_KEYS[index],
+            price,
+          });
+          labelIndex += 1;
+        });
+      } else {
+        // Size services (and Variant rows without explicit labels): the
+        // S/M/L columns are themselves the labels, positionally.
+        columnPrices.forEach((price, index) => {
+          if (price != null) {
+            variants.push({ label: SIZE_KEYS[index], price });
+          }
+        });
+      }
     }
 
     const key = serviceKey(category, name, genderCanonical ?? gender);    if (category && name && (genderCanonical || gender)) {
@@ -664,7 +694,10 @@ export async function parseServicesWorkbook(buffer) {
 }
 
 // Writes validated rows inside ONE transaction: every service is upserted by
-// (category + name + gender); variants and branch links are replaced.
+// (category + name + gender); variants and branch links are replaced. The
+// workbook has no price-range column: size/variant ranges are derived from
+// the S/M/L prices in the file, while fixed/from services keep whatever
+// range the database already holds.
 export async function applyServicesImport(parsedRows) {
   const connection = await db.getConnection();
   let created = 0;
@@ -677,19 +710,35 @@ export async function applyServicesImport(parsedRows) {
     // rather than as MySQL-specific REGEXP_REPLACE SQL, so both sides of the
     // match always agree on normalization.
     const [existingRows] = await connection.query(
-      `SELECT s.id, s.name, s.audience, c.name AS category_name
+      `SELECT s.id, s.name, s.audience, s.price_range, c.name AS category_name
        FROM services s
        INNER JOIN categories c ON c.id = s.category_id`,
     );
     const existingByKey = new Map(
       existingRows.map((s) => [
         serviceKey(s.category_name, s.name, s.audience),
-        Number(s.id),
+        {
+          id: Number(s.id),
+          // Needed to preserve price_range for fixed/from services (the
+          // workbook format cannot express it — see priceRange below).
+          priceRange: s.price_range != null ? String(s.price_range) : null,
+        },
       ]),
     );
 
     for (const row of parsedRows) {
-      const existingId = existingByKey.get(row.key);
+      const existing = existingByKey.get(row.key);
+      const existingId = existing?.id;
+
+      // Size/variant ranges are derived from the file's S/M/L prices; for
+      // fixed/from services the range is optional admin-entered display
+      // text the 17-column format cannot carry, so an import must never
+      // wipe the stored value (e.g. when only a price was edited).
+      const priceRange =
+        row.priceRange ??
+        (existingId && (row.priceType === "fixed" || row.priceType === "from")
+          ? existing.priceRange
+          : null);
 
       if (existingId) {
         await connection.query(
@@ -704,7 +753,7 @@ export async function applyServicesImport(parsedRows) {
             row.gender,
             row.priceType,
             row.price,
-            row.priceRange,
+            priceRange,
             row.duration,
             row.description,
             Boolean(row.isActive),
@@ -744,7 +793,7 @@ export async function applyServicesImport(parsedRows) {
             row.gender,
             row.priceType,
             row.price,
-            row.priceRange,
+            priceRange,
             row.duration,
             row.description,
             Boolean(row.isActive),
@@ -752,11 +801,11 @@ export async function applyServicesImport(parsedRows) {
             row.goodToKnow,
           ],
         );
-        existingByKey.set(row.key, Number(result.insertId));
+        existingByKey.set(row.key, { id: Number(result.insertId), priceRange });
         created += 1;
       }
 
-      const serviceId = existingByKey.get(row.key);
+      const serviceId = existingByKey.get(row.key)?.id;
 
       await connection.query(`DELETE FROM service_variants WHERE service_id = ?`, [
         serviceId,
