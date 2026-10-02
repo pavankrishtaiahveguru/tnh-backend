@@ -236,13 +236,19 @@ export function mapServiceToRow(service) {
   const pricingType = PRICE_TYPE_LABEL[service.pricing_type] ?? "Fixed";
   const variants = (service.variants ?? []).filter((v) => v.label);
 
-  // Reference convention: a size/variant service's prices sit in the S/M/L
-  // columns in variant order, and Variant Labels carries the label text
-  // ("S / M / L" for sizes, "20 min / 30 min" or "Two prices published"
+  // Reference convention: any service whose prices live in service_variants
+  // (size, variant, and the "From" services that also carry real variant
+  // rows — S/M/L or labelled like "20 min / 30 min") gets its prices in the
+  // S/M/L columns in variant order, and Variant Labels carries the label
+  // text ("S / M / L" for sizes, "20 min / 30 min" or "Two prices published"
   // for variants). Mapping is positional, so it round-trips exactly.
   const sizePrice = {};
   let variantText = "";
-  if (service.pricing_type === "size" || service.pricing_type === "variant") {
+  if (
+    service.pricing_type === "size" ||
+    service.pricing_type === "variant" ||
+    service.pricing_type === "from"
+  ) {
     SIZE_KEYS.forEach((key, index) => {
       sizePrice[key] = variants[index]?.price ?? null;
     });
@@ -497,21 +503,31 @@ export function validateServicesRows(rows, allBranches) {
       }
     }
 
-    // Build the variant list the database stores for size/variant pricing.
+    // Build the variant list the database stores for size/variant pricing —
+    // and for "From" services, which also carry real service_variants rows
+    // (S/M/L or labelled). Without this, re-importing an export would delete
+    // every From service's variants instead of round-tripping them.
     // Exact inverse of the positional export mapping: S/M/L column 1/2/3
     // carries variant 1/2/3's price and Variant Labels item 1/2/3 its label.
     // Prices pair with labels in the order the prices appear (S, then M,
     // then L), so a hand-blanked middle column keeps its neighbours' labels
     // on the right prices instead of shifting them onto the wrong variant.
     const variants = [];
-    if (priceType === "size" || priceType === "variant") {
+    if (
+      priceType === "size" ||
+      priceType === "variant" ||
+      priceType === "from"
+    ) {
       const isSizeWord = (label) =>
         SIZE_KEYS.some((s) => s.toLowerCase() === label.toLowerCase());
       const explicitLabels = variantLabels.filter((label) => !isSizeWord(label));
       const columnPrices = [sPrice, mPrice, lPrice];
       const filledCount = columnPrices.filter((p) => p != null).length;
 
-      if (priceType === "variant" && explicitLabels.length > 0) {
+      if (
+        (priceType === "variant" || priceType === "from") &&
+        explicitLabels.length > 0
+      ) {
         // Explicit labels must state exactly one label per filled price
         // column — a mismatch would pair labels with the wrong prices or
         // silently drop a price, so the file is rejected instead.
