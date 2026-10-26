@@ -5,7 +5,7 @@ Node.js + Express REST API powering The Nail Hue salon website (`tnh-salon`) and
 ## Overview
 
 - **Public API** — services catalogue (with filters, search, pagination), categories/sub-categories, branches.
-- **Admin API** — JWT-protected CRUD for services and categories, branch updates, Cloudinary image uploads, and reference-format Excel export/import of the catalogue.
+- **Admin API** — JWT-protected CRUD for services and categories, branch updates, Cloudflare R2 media uploads, and reference-format Excel export/import of the catalogue.
 - **Database** — PostgreSQL on [Neon](https://neon.tech) via raw SQL (`pg`, no ORM).
 
 ## Features
@@ -33,7 +33,8 @@ Node.js + Express REST API powering The Nail Hue salon website (`tnh-salon`) and
 - `Authorization: Bearer <token>` middleware protects all admin routes
 
 ### Uploads
-- `POST /api/upload/image` — admin-only image upload to **Cloudinary** (5 MB max, `image/*` only, folder whitelist: `categories`, `services`)
+- `POST /api/upload/image` and `/api/upload/video` — admin-only media uploads to **Cloudflare R2** (5 MB image / 250 MB video limit; folder whitelist: `categories`, `services`)
+- `DELETE /api/upload/media` — admin-only deletion of an unreferenced R2 object
 
 ### Catalogue Import / Export
 - `GET /api/catalog/export` — streams the live catalogue as a reference-format `.xlsx` (ExcelJS; 2 sheets, 17 service columns)
@@ -58,7 +59,7 @@ Confirmed from `package.json`:
 | Framework | Express 4 |
 | Database | PostgreSQL via `pg` — hosted on Neon, raw SQL, no ORM |
 | Auth | `jsonwebtoken`, `bcryptjs` |
-| Uploads | `multer`, `cloudinary` |
+| Uploads | `multer`, AWS SDK for JavaScript v3 (Cloudflare R2) |
 | Excel | `exceljs` |
 | Config | `dotenv`, `cors` |
 | Dev | `nodemon` |
@@ -78,8 +79,9 @@ Controllers (src/controllers)      ← request validation + response shaping
 Services (src/services)            ← business logic (auth, Excel)
         ▼
 Models (src/models)                ← raw SQL via src/config/database.js
-        ▼
-PostgreSQL (Neon)        External: Cloudinary
+        ├───────────────────────┐
+        ▼                       ▼
+PostgreSQL (Neon)         Cloudflare R2
 ```
 
 ## Project Structure
@@ -87,7 +89,7 @@ PostgreSQL (Neon)        External: Cloudinary
 ```
 tnh-backend/
 ├── src/
-│   ├── config/            # database.js (pg pool + compat layer), cloudinary.js
+│   ├── config/            # database.js (pg pool + compat layer)
 │   ├── controllers/       # auth, service, category, branch, upload, catalog
 │   ├── middleware/        # authMiddleware.js (JWT Bearer)
 │   ├── models/            # raw SQL: Admin, Service, Category, Branch
@@ -98,7 +100,7 @@ tnh-backend/
 │   ├── utils/             # perfLog.js (dev-only API timing)
 │   └── server.js          # entry point
 ├── data/                  # catalog-services.mjs, catalog-categories.mjs (seed source)
-├── scripts/               # seedCatalog.mjs, backfillServiceSubCategories.mjs, test-*.mjs
+├── scripts/               # seed, migration and test scripts
 ├── database.pg.sql        # canonical PostgreSQL schema
 ├── database.sql           # legacy MySQL schema (historical reference only)
 ├── package.json
@@ -129,7 +131,9 @@ All routes verified against `src/routes`:
 | DELETE | `/api/categories/:id` | ✓ | Delete a category |
 | GET | `/api/branches` | — | List branches |
 | PUT | `/api/branches/:id` | ✓ | Update a branch profile |
-| POST | `/api/upload/image` | ✓ | Upload image to Cloudinary (multipart field `image`) |
+| POST | `/api/upload/image` | ✓ | Upload image to R2 (multipart field `image`) |
+| POST | `/api/upload/video` | ✓ | Upload video to R2 (multipart field `video`) |
+| DELETE | `/api/upload/media` | ✓ | Delete an unreferenced R2 object (JSON `objectKey`) |
 | GET | `/api/catalog/export` | ✓ | Download the catalogue as reference `.xlsx` |
 | POST | `/api/catalog/import` | ✓ | Import a reference `.xlsx` (multipart field `file`, ≤ 10 MB) |
 ## Database
@@ -183,8 +187,74 @@ Copy `.env.example` to `.env`. Names only — fill in your own values; never com
 | `JWT_EXPIRES_IN` | Token lifetime (e.g. `1d`) |
 | `CLIENT_URL` | Allowed CORS origin (frontend URL) |
 | `ADMIN_NAME` / `ADMIN_EMAIL` / `ADMIN_PASSWORD` | Credentials for the admin seeder |
-| `CLOUDINARY_CLOUD_NAME` / `CLOUDINARY_API_KEY` / `CLOUDINARY_API_SECRET` | Cloudinary upload credentials |
-| `CLOUDINARY_FOLDER` | Root Cloudinary folder (default `tnh-salon`) |
+| `R2_ACCOUNT_ID` | Cloudflare account ID used for the S3-compatible API endpoint |
+| `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | Server-side R2 credentials; scope these to the migration bucket |
+| `R2_BUCKET_NAME` | Existing R2 bucket to receive migrated objects |
+| `R2_PUBLIC_BASE_URL` | HTTPS public media domain (not the S3 API endpoint) |
+
+### Cloudflare R2 media storage
+
+Admin uploads use the authenticated `/api/upload/image` and `/api/upload/video`
+routes. R2 configuration is checked only when an upload/delete/migration
+operation is requested; the backend and unrelated API routes can start without
+R2 credentials. Image uploads are limited to 5 MB and videos to 250 MB.
+Uploads are content-sniffed, assigned collision-resistant content-addressed
+keys, and checked against R2 plus the configured public HTTPS domain. Video
+public delivery is checked for byte-range support.
+
+Set the five `R2_*` values in the backend's local `.env` and production
+environment. Set `NEXT_PUBLIC_R2_PUBLIC_BASE_URL` in the frontend build
+environment to the same HTTPS public domain; this value is public and contains
+no credentials. The frontend accepts remote database media only from this
+configured domain and retains relative `/public` asset paths.
+
+### Existing media migration
+
+`npm run media:prepare` reads current Neon media references and local media
+filenames into `data/media-migration-manifest.json`. It does not contact the
+source provider or write to Neon. The manifest is the rollback/audit record and
+must be backed up securely because it contains existing media URLs.
+
+Only explicitly mapped replacement files are eligible for upload. Prepare a
+JSON file mapping each `assetId` to a verified replacement source file path:
+
+```json
+{
+  "ASSET_ID_FROM_MANIFEST": "/absolute/path/to/verified-replacement.webp"
+}
+```
+
+The filename index in the manifest is for discovery only and does not
+automatically authorize a source file. Map every source explicitly after
+confirming it is the intended media; a matching filename alone does not prove
+the bytes are the correct replacement. Source map keys may be an `assetId` or
+an exact original URL from the manifest.
+
+Validate the source mapping and calculate keys/hashes without uploading or
+changing Neon:
+
+```sh
+npm run media:migrate -- --dry-run --source-map /secure/path/media-map.json
+```
+
+After reviewing the manifest and dry-run output, upload each mapped file,
+verify R2 object bytes and public delivery, and then update only the matching
+media URL fields:
+
+```sh
+npm run media:migrate -- --source-map /secure/path/media-map.json
+```
+
+To restore original database URLs from the manifest (R2 objects are retained):
+
+```sh
+npm run media:rollback
+```
+
+The migration leaves unmapped records unchanged and marks them as needing a
+replacement. It does not substitute unrelated static media or clear media
+fields. Take a database backup and review every mapped asset before running
+against production.
 
 ## Security
 
@@ -211,7 +281,7 @@ Status codes actually returned by the code:
 | `404` | Unknown route, service, category or branch |
 | `409` | Duplicate category name/slug on create |
 | `500` | Unexpected server error (generic message) |
-| `502` | Cloudinary upload failure |
+| `502` | R2 media upload or deletion failure |
 
 ## Running Locally
 

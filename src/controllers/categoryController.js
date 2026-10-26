@@ -14,6 +14,7 @@ import {
   reorderSubCategories,
 } from "../models/Category.js";
 import pool from "../config/database.js";
+import { deleteReplacedR2Media } from "./uploadController.js";
 
 async function handle(res, fn) {
   try {
@@ -135,6 +136,11 @@ export async function updateExistingCategory(req, res) {
         .json({ success: false, message: "Category not found" });
     }
 
+    const imageWasUpdated =
+      body.image !== undefined || body.imageUrl !== undefined;
+    const previousImageUrl = category.image ?? category.image_url;
+    const nextImageUrl = body.image ?? body.imageUrl ?? null;
+
     await updateCategory(category.id, {
       name: body.name !== undefined ? String(body.name).trim() : undefined,
       description: body.description,
@@ -144,6 +150,10 @@ export async function updateExistingCategory(req, res) {
       is_active:
         body.isActive !== undefined ? body.isActive !== false : undefined,
     });
+
+    if (imageWasUpdated) {
+      await deleteReplacedR2Media(previousImageUrl, nextImageUrl);
+    }
 
     if (Array.isArray(body.subCategories)) {
       try {
@@ -198,6 +208,10 @@ export async function removeCategory(req, res) {
     }
 
     await deleteCategory(category.id);
+    await deleteReplacedR2Media(
+      category.image ?? category.image_url,
+      null,
+    );
     return res.status(200).json({ success: true, message: "Category deleted" });
   });
 }

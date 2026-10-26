@@ -14,12 +14,17 @@
     "backfill:subcategories": "node scripts/backfillServiceSubCategories.mjs",
     "backfill:subcategory-order": "node scripts/backfillSubCategoryOrder.mjs",
     "backfill:service-order": "node scripts/backfillServiceOrder.mjs",
+    "media:prepare": "node scripts/migrateMediaToR2.mjs --prepare",
+    "media:migrate": "node scripts/migrateMediaToR2.mjs --migrate",
+    "media:rollback": "node scripts/migrateMediaToR2.mjs --rollback",
+    "test": "node --test tests/*.test.js",
     "db:migrate": "node src/database/migrate.js",
     "db:seed": "node src/database/seed.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1156.0",
+    "@aws-sdk/lib-storage": "^3.1156.0",
     "bcryptjs": "^2.4.3",
-    "cloudinary": "^2.11.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "exceljs": "^4.4.0",
@@ -30,5 +35,10 @@
   },
   "devDependencies": {
     "nodemon": "^3.1.4"
+  },
+  "overrides": {
+    "exceljs": {
+      "uuid": "11.1.1"
+    }
   }
 }

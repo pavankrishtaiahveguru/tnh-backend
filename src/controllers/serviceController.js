@@ -22,6 +22,7 @@ import {
 import { findBranches } from "../models/Branch.js";
 import { runWithQueryContext } from "../config/database.js";
 import { logApiTiming } from "../utils/perfLog.js";
+import { deleteReplacedR2Media } from "./uploadController.js";
 
 // Pagination defaults (Phase 5) — sensible maximum so no client can request
 // thousands of rows at once.
@@ -307,6 +308,11 @@ export async function updateExistingService(req, res) {
       }
     }
 
+    const imageWasUpdated =
+      body.image !== undefined || body.imageUrl !== undefined;
+    const previousImageUrl = service.image ?? service.image_url;
+    const nextImageUrl = body.image ?? body.imageUrl ?? null;
+
     await updateService(service.id, {
       name: body.name !== undefined ? String(body.name).trim() : undefined,
       category_id: categoryId,
@@ -338,6 +344,10 @@ export async function updateExistingService(req, res) {
       variants: body.variants,
       branch_ids: branchIds,
     });
+
+    if (imageWasUpdated) {
+      await deleteReplacedR2Media(previousImageUrl, nextImageUrl);
+    }
 
     const updated = await findServiceById(service.id);
     return res.status(200).json({
@@ -395,6 +405,7 @@ export async function removeService(req, res) {
     }
 
     await deleteService(service.id);
+    await deleteReplacedR2Media(service.image ?? service.image_url, null);
     return res.status(200).json({ success: true, message: "Service deleted" });
   });
 }
