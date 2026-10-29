@@ -129,8 +129,14 @@ function logR2Failure(operation, error) {
   if (typeof errorCode === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(errorCode)) {
     diagnostic.errorCode = errorCode;
   }
-  const httpStatus = error?.$metadata?.httpStatusCode;
+  if (typeof error?.stage === "string" && /^[a-z-]{1,40}$/.test(error.stage)) {
+    diagnostic.stage = error.stage;
+  }
+  const httpStatus = error?.httpStatus ?? error?.$metadata?.httpStatusCode;
   if (Number.isInteger(httpStatus)) diagnostic.httpStatus = httpStatus;
+  if (typeof error?.message === "string") {
+    diagnostic.reason = error.message.slice(0, 240);
+  }
   console.error(`R2 ${operation} failed.`, diagnostic);
 }
 

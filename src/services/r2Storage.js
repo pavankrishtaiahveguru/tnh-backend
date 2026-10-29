@@ -151,6 +151,20 @@ async function hashFile(filePath) {
   return hashReadable(createReadStream(filePath));
 }
 
+function verificationError(stage, reason, httpStatus) {
+  const error = new Error(reason);
+  error.name = "R2VerificationError";
+  error.stage = stage;
+  if (Number.isInteger(httpStatus)) error.httpStatus = httpStatus;
+  return error;
+}
+
+function stageError(error, stage) {
+  const staged = error instanceof Error ? error : new Error(String(error));
+  staged.stage ??= stage;
+  return staged;
+}
+
 export function getObjectKeyFromPublicUrl(publicUrl, env = process.env) {
   const config = getR2Config(env);
   let candidate;
@@ -197,39 +211,62 @@ export function createR2Storage(env = process.env, options = {}) {
   const fetchImpl = options.fetchImpl ?? fetch;
 
   async function verifyStoredObject(objectKey, expected) {
-    const head = await client.send(
-      new HeadObjectCommand({
-        Bucket: config.bucketName,
-        Key: objectKey,
-      }),
-    );
+    let head;
+    try {
+      head = await client.send(
+        new HeadObjectCommand({
+          Bucket: config.bucketName,
+          Key: objectKey,
+        }),
+      );
+    } catch (error) {
+      throw stageError(error, "storage-head");
+    }
     if (
       head.ContentLength !== expected.byteLength ||
       head.ContentType !== expected.contentType ||
       head.Metadata?.sha256 !== expected.sha256
     ) {
-      throw new Error(`R2 object verification failed for ${objectKey}.`);
+      throw verificationError(
+        "storage-metadata",
+        `R2 object metadata mismatch for ${objectKey}.`,
+      );
     }
 
-    const stored = await client.send(
-      new GetObjectCommand({
-        Bucket: config.bucketName,
-        Key: objectKey,
-      }),
-    );
+    let stored;
+    try {
+      stored = await client.send(
+        new GetObjectCommand({
+          Bucket: config.bucketName,
+          Key: objectKey,
+        }),
+      );
+    } catch (error) {
+      throw stageError(error, "storage-download");
+    }
     const storedHash = await hashReadable(stored.Body);
     if (
       storedHash.byteLength !== expected.byteLength ||
       storedHash.sha256 !== expected.sha256
     ) {
-      throw new Error(`R2 object content mismatch for ${objectKey}.`);
+      throw verificationError(
+        "storage-content",
+        `R2 object content mismatch for ${objectKey}.`,
+      );
     }
 
     const publicUrl = buildPublicMediaUrl(config.publicBaseUrl, objectKey);
-    const publicHead = await fetchImpl(publicUrl, { method: "HEAD" });
+    let publicHead;
+    try {
+      publicHead = await fetchImpl(publicUrl, { method: "HEAD" });
+    } catch (error) {
+      throw stageError(error, "public-head");
+    }
     if (!publicHead.ok) {
-      throw new Error(
+      throw verificationError(
+        "public-head",
         `R2 public URL verification failed with HTTP ${publicHead.status}.`,
+        publicHead.status,
       );
     }
     if (
@@ -238,13 +275,23 @@ export function createR2Storage(env = process.env, options = {}) {
       (publicHead.headers.get("content-length") &&
         Number(publicHead.headers.get("content-length")) !== expected.byteLength)
     ) {
-      throw new Error(`R2 public URL metadata mismatch for ${objectKey}.`);
+      throw verificationError(
+        "public-metadata",
+        `R2 public URL metadata mismatch for ${objectKey}.`,
+      );
     }
 
-    const publicResponse = await fetchImpl(publicUrl);
+    let publicResponse;
+    try {
+      publicResponse = await fetchImpl(publicUrl);
+    } catch (error) {
+      throw stageError(error, "public-download");
+    }
     if (!publicResponse.ok || !publicResponse.body) {
-      throw new Error(
+      throw verificationError(
+        "public-download",
         `R2 public media download failed with HTTP ${publicResponse.status}.`,
+        publicResponse.status,
       );
     }
     const publicHash = await hashReadable(publicResponse.body);
@@ -252,20 +299,32 @@ export function createR2Storage(env = process.env, options = {}) {
       publicHash.byteLength !== expected.byteLength ||
       publicHash.sha256 !== expected.sha256
     ) {
-      throw new Error(`R2 public media content mismatch for ${objectKey}.`);
+      throw verificationError(
+        "public-content",
+        `R2 public media content mismatch for ${objectKey}.`,
+      );
     }
 
     if (expected.contentType.startsWith("video/")) {
-      const rangeResponse = await fetchImpl(publicUrl, {
-        headers: { Range: "bytes=0-0" },
-      });
+      let rangeResponse;
+      try {
+        rangeResponse = await fetchImpl(publicUrl, {
+          headers: { Range: "bytes=0-0" },
+        });
+      } catch (error) {
+        throw stageError(error, "public-range");
+      }
       const contentRange = rangeResponse.headers.get("content-range") ?? "";
       await rangeResponse.body?.cancel();
       if (
         rangeResponse.status !== 206 ||
         !/^bytes 0-0\/\d+$/.test(contentRange)
       ) {
-        throw new Error(`R2 video range-request verification failed for ${objectKey}.`);
+        throw verificationError(
+          "public-range",
+          `R2 video range-request verification failed for ${objectKey}.`,
+          rangeResponse.status,
+        );
       }
     }
 

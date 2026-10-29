@@ -391,6 +391,33 @@ test("failed upload is reported and does not return an R2 URL", async () => {
   assert.equal(deleteCount, 0);
 });
 
+test("public verification failures retain the HTTP status and stage for diagnostics", async () => {
+  const client = new MemoryR2Client();
+  const storage = createR2Storage(R2_ENV, {
+    client,
+    fetchImpl: async (url, options = {}) => {
+      const response = await publicFetch(client)(url, options);
+      if (options.method === "HEAD") {
+        return new Response(null, { status: 403 });
+      }
+      return response;
+    },
+  });
+  await assert.rejects(
+    storage.uploadAndVerify({
+      buffer: fixturePng(),
+      originalName: "image.png",
+      contentType: "image/png",
+      objectKey: "categories/test/image.png",
+    }),
+    (error) =>
+      error.name === "R2VerificationError" &&
+      error.stage === "public-head" &&
+      error.httpStatus === 403 &&
+      /HTTP 403/.test(error.message),
+  );
+});
+
 test("media deletion refuses referenced objects and deletes only an unreferenced key", async () => {
   const client = new MemoryR2Client();
   const storage = makeStorage(client);
